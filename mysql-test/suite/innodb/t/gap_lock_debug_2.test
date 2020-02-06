@@ -1,0 +1,204 @@
+--source include/have_innodb.inc
+--source include/have_sequence.inc
+
+SET @saved_frequency = @@GLOBAL.innodb_purge_rseg_truncate_frequency;
+SET GLOBAL innodb_purge_rseg_truncate_frequency = 1;
+
+--let $max_records = 130000
+--let $page_size_in_rows = 2048
+--let $pg_val = ($page_size_in_rows * 10)
+--let $pg_gap = ($pg_val*6)
+--let $pg_not_gap = ($pg_val*2)
+--let $gaps_count = 7
+
+--let $select_for_update = 5
+--let $serializable = 4
+--let $repeatable_read = 3
+--let $read_committed = 2
+--let $read_uncommitted = 1
+--let $isolation_level = $select_for_update
+
+while ($isolation_level) {
+--echo ##########
+--echo # test for isolation level $isolation_level
+--echo ###
+
+create table t(a int unsigned primary key,
+               b int unsigned,
+               index b (b)) engine=innodb;
+
+connect (prevent_purge,localhost,root,,);
+start transaction with consistent snapshot;
+
+connection default;
+
+begin;
+--eval insert into t select seq*10, seq*10 from seq_1_to_$max_records
+
+# Delete several records at the start and the end of the table to check if
+# bidirectional gap locks extending works well when a tables start/end
+# is reached.
+delete from t where a < 100;
+--eval delete from t where a > (($max_records * 10) - 100)
+
+# Delete several pages to test if persistent cursor is moved correctly
+# through several pages.
+--eval SET @pg = $pg_val
+--eval SET @pg_gap = $pg_gap
+--eval SET @pg_not_gap = $pg_not_gap
+--let $i = $gaps_count
+while ($i) {
+delete from t where a between @pg and @pg + @pg_gap;
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+--dec $i
+}
+commit;
+check table t;
+begin;
+
+connect (con1,localhost,root,,);
+if ($isolation_level == $select_for_update) {
+--let $for_update=FOR UPDATE
+}
+if ($isolation_level != $select_for_update) {
+--let $for_update=
+}
+if ($isolation_level == $serializable) {
+set transaction isolation level serializable;
+}
+if ($isolation_level == $repeatable_read) {
+set transaction isolation level repeatable read;
+}
+if ($isolation_level == $read_committed) {
+set transaction isolation level read committed;
+}
+if ($isolation_level == $read_uncommitted) {
+set transaction isolation level read uncommitted;
+}
+begin;
+--eval SELECT * FROM t WHERE a = 50 $for_update
+--eval SELECT * FROM t WHERE a = ($max_records * 10) - 50 $for_update
+
+--eval SET @pg = $pg_val
+--eval SET @pg_gap = $pg_gap
+--eval SET @pg_not_gap = $pg_not_gap
+
+# match_mode == ROW_SEL_EXACT
+# && 0 != cmp_dtuple_rec(search_tuple, rec, offsets)
+--eval select * from t where a = @pg + (@pg_gap/2) + 5 $for_update
+
+# match_mode == ROW_SEL_EXACT_PREFIX
+# && 0 != cmp_dtuple_rec(search_tuple, rec, offsets)
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+eval SELECT * FROM t WHERE b = @pg + (@pg_gap/2) + 5 ORDER BY a DESC
+  $for_update;
+
+# match_mode == ROW_SEL_EXACT
+# && 0 == cmp_dtuple_rec(search_tuple, rec, offsets)
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+--eval select * from t where a = @pg + (@pg_gap/2) $for_update
+
+# match_mode == ROW_SEL_EXACT_PREFIX
+# && 0 == cmp_dtuple_rec(search_tuple, rec, offsets)
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+--eval SELECT * FROM t WHERE b = @pg + (@pg_gap/2) ORDER BY a DESC $for_update
+
+# inside of gap
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+eval SELECT * FROM t WHERE a between
+  @pg + (@pg_gap/2) - 20 and @pg + (@pg_gap/2) + 20 $for_update;
+
+# overlap the gap from the left
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+--eval SELECT * FROM t WHERE a between @pg - 20 and @pg + 20 $for_update
+
+#overlap the gap from the right
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+eval SELECT * FROM t WHERE a between @pg + @pg_gap - 20 and @pg + @pg_gap + 20
+  $for_update;
+
+connection default;
+
+SET session innodb_lock_wait_timeout=1;
+
+if ($isolation_level >= $serializable) {
+
+--error ER_LOCK_WAIT_TIMEOUT
+insert into t values(5, 5);
+--error ER_LOCK_WAIT_TIMEOUT
+--eval insert into t values(($max_records * 10) - 5, ($max_records * 10) - 5)
+
+
+--eval SET @pg = $pg_val
+--let $i = 5
+
+while ($i) {
+insert into t values(@pg - 15, @pg - 15);
+insert into t values(@pg + @pg_gap + 15, @pg + @pg_gap + 15);
+
+--error ER_LOCK_WAIT_TIMEOUT
+insert into t values(@pg + 5, @pg + 5);
+--error ER_LOCK_WAIT_TIMEOUT
+insert into t values(@pg + @pg_gap - 5, @pg + @pg_gap - 5);
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+--dec $i
+}
+
+insert into t values(@pg - 20 - 15, @pg - 20 - 15);
+insert into t values(@pg + @pg_gap + 15, @pg + @pg_gap + 15);
+--error ER_LOCK_WAIT_TIMEOUT
+insert into t values(@pg - 5, @pg - 5);
+--error ER_LOCK_WAIT_TIMEOUT
+insert into t values(@pg + @pg_gap - 5, @pg + @pg_gap - 5);
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+
+insert into t values(@pg - 15, @pg - 15);
+insert into t values(@pg + @pg_gap + 20 + 15, @pg + @pg_gap + 20 + 15);
+--error ER_LOCK_WAIT_TIMEOUT
+insert into t values(@pg + 5, @pg + 5);
+--error ER_LOCK_WAIT_TIMEOUT
+insert into t values(@pg + @pg_gap + 20 - 5, @pg + @pg_gap + 20 - 5);
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+}
+
+
+if ($isolation_level < $serializable) {
+
+insert into t values(5, 5);
+--eval insert into t values(($max_records * 10) - 5, ($max_records * 10) - 5)
+
+--eval SET @pg = $pg_val
+--let $i = 5
+
+while ($i) {
+insert into t values(@pg - 15, @pg - 15);
+insert into t values(@pg + @pg_gap + 15, @pg + @pg_gap + 15);
+
+insert into t values(@pg + 5, @pg + 5);
+insert into t values(@pg + @pg_gap - 5, @pg + @pg_gap - 5);
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+--dec $i
+}
+
+insert into t values(@pg - 20 - 15, @pg - 20 - 15);
+insert into t values(@pg + @pg_gap + 15, @pg + @pg_gap + 15);
+insert into t values(@pg - 5, @pg - 5);
+insert into t values(@pg + @pg_gap - 5, @pg + @pg_gap - 5);
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+
+insert into t values(@pg - 15, @pg - 15);
+insert into t values(@pg + @pg_gap + 20 + 15, @pg + @pg_gap + 20 + 15);
+insert into t values(@pg + 5, @pg + 5);
+insert into t values(@pg + @pg_gap + 20 - 5, @pg + @pg_gap + 20 - 5);
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+}
+
+
+disconnect prevent_purge;
+disconnect con1;
+connection default;
+rollback;
+drop table t;
+--dec $isolation_level
+}
+SET GLOBAL innodb_purge_rseg_truncate_frequency = @saved_frequency;
