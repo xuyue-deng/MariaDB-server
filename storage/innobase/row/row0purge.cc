@@ -142,13 +142,13 @@ row_purge_remove_clust_if_poss_low(
 
 	if (mode == BTR_MODIFY_LEAF) {
 		success = btr_cur_optimistic_delete(
-			btr_pcur_get_btr_cur(&node->pcur), 0, &mtr);
+			btr_pcur_get_btr_cur(&node->pcur), 0, &mtr, true);
 	} else {
 		dberr_t	err;
 		ut_ad(mode == (BTR_MODIFY_TREE | BTR_LATCH_FOR_DELETE));
 		btr_cur_pessimistic_delete(
 			&err, FALSE, btr_pcur_get_btr_cur(&node->pcur), 0,
-			false, &mtr);
+			false, &mtr, true);
 
 		switch (err) {
 		case DB_SUCCESS:
@@ -466,7 +466,7 @@ row_purge_remove_sec_if_poss_tree(
 
 		btr_cur_pessimistic_delete(&err, FALSE,
 					   btr_pcur_get_btr_cur(&pcur),
-					   0, false, &mtr);
+					   0, false, &mtr, true);
 		switch (UNIV_EXPECT(err, DB_SUCCESS)) {
 		case DB_SUCCESS:
 			break;
@@ -636,7 +636,7 @@ row_purge_remove_sec_if_poss_leaf(
 				}
 			}
 
-			if (!btr_cur_optimistic_delete(btr_cur, 0, &mtr)) {
+			if (!btr_cur_optimistic_delete(btr_cur, 0, &mtr, true)) {
 
 				/* The index entry could not be deleted. */
 				success = false;
@@ -1187,6 +1187,8 @@ row_purge_end(
 	que_thr_t*	thr)	/*!< in: query thread */
 {
 	ut_ad(thr);
+
+	DEBUG_SYNC(thr_get_trx(thr)->mysql_thd, "row_purge_end_enter");
 
 	thr->run_node = static_cast<purge_node_t*>(thr->run_node)->end();
 

@@ -1,0 +1,24 @@
+--source include/have_innodb.inc
+--source include/have_debug.inc
+--source include/have_debug_sync.inc
+
+create table t1 (f1 int not null, primary key(f1)) engine=innodb;
+insert into t1 values (0), (5), (9), (13), (15), (20);
+
+connect(con0,localhost,root,,);
+start transaction with consistent snapshot;
+
+connection default;
+delete from t1 where f1 between 2 and 10;
+
+connect(con1,localhost,root,,);
+begin;
+select * from t1 where f1 < 2 for update;
+
+connect(con2,localhost,root,,);
+begin;
+set debug_sync="lock_wait_suspend_thread_enter SIGNAL purge_start";
+send select * from t1 where f1 < 2 for update;
+
+--connection default
+set debug_sync="now WAIT_FOR purge_start";

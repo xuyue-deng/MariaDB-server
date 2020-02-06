@@ -488,27 +488,19 @@ that the mtr has an x-latch on the page where the cursor is positioned,
 but no latch on the whole tree.
 @return TRUE if success, i.e., the page did not become too empty */
 ibool
-btr_cur_optimistic_delete_func(
+btr_cur_optimistic_delete(
 /*===========================*/
 	btr_cur_t*	cursor,	/*!< in: cursor on the record to delete;
 				cursor stays valid: if deletion succeeds,
 				on function exit it points to the successor
 				of the deleted record */
-# ifdef UNIV_DEBUG
 	ulint		flags,	/*!< in: BTR_CREATE_FLAG or 0 */
-# endif /* UNIV_DEBUG */
-	mtr_t*		mtr)	/*!< in: mtr; if this function returns
+	mtr_t*		mtr,	/*!< in: mtr; if this function returns
 				TRUE on a leaf page of a secondary
 				index, the mtr must be committed
 				before latching any further pages */
+	bool interesting=false)
 	MY_ATTRIBUTE((nonnull, warn_unused_result));
-# ifdef UNIV_DEBUG
-#  define btr_cur_optimistic_delete(cursor, flags, mtr)		\
-	btr_cur_optimistic_delete_func(cursor, flags, mtr)
-# else /* UNIV_DEBUG */
-#  define btr_cur_optimistic_delete(cursor, flags, mtr)		\
-	btr_cur_optimistic_delete_func(cursor, mtr)
-# endif /* UNIV_DEBUG */
 /*************************************************************//**
 Removes the record on which the tree cursor is positioned. Tries
 to compress the page if its fillfactor drops below a threshold
@@ -535,7 +527,8 @@ btr_cur_pessimistic_delete(
 				deleted record on function exit */
 	ulint		flags,	/*!< in: BTR_CREATE_FLAG or 0 */
 	bool		rollback,/*!< in: performing rollback? */
-	mtr_t*		mtr)	/*!< in: mtr */
+	mtr_t*		mtr,	/*!< in: mtr */
+	bool interesting=false)
 	MY_ATTRIBUTE((nonnull));
 /** Delete the node pointer in a parent page.
 @param[in,out]	parent	cursor pointing to parent record

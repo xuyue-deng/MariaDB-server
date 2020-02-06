@@ -237,7 +237,8 @@ void
 lock_update_delete(
 /*===============*/
 	const buf_block_t*	block,	/*!< in: buffer block containing rec */
-	const rec_t*		rec);	/*!< in: the record to be removed */
+	const rec_t*		rec,	/*!< in: the record to be removed */
+	bool interesting = false);
 /*********************************************************************//**
 Stores on the page infimum record the explicit locks of another record.
 This function is used to store the lock state of a record when it is

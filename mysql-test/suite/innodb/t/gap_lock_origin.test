@@ -1,0 +1,41 @@
+--source include/have_innodb.inc
+--source include/have_debug.inc
+--source include/have_debug_sync.inc
+#--source include/have_sequence.inc
+
+create table t1 (f1 int not null, primary key(f1))engine=innodb;
+#insert into t1 select -seq from seq_10000_to_1;
+insert into t1 values(1);
+
+connect(con_purge,localhost,root,,);
+start transaction with consistent snapshot;
+
+connection default;
+delete from t1 where f1=1;
+
+connect(con1,localhost,root,,);
+begin;
+select * from t1 where f1 > 2 for update;
+
+# Connection con2 will wait for LOCK_ORDINARY in delete marked record.
+connect(con2,localhost,root,,);
+begin;
+set debug_sync="lock_wait_suspend_thread_enter SIGNAL purge_start";
+#SET GLOBAL innodb_debug_sync = "row_purge_end_enter SIGNAL purge_start";
+send select * from t1 where f1 > 2 for update;
+
+connection con_purge;
+set debug_sync="now WAIT_FOR purge_start";
+#set global innodb_debug_sync="now WAIT_FOR purge_start";
+# Allow purge to start and crash at the instrumented patch. (grant lock_wait for con2)
+commit;
+
+connection con2;
+reap;
+
+disconnect con2;
+disconnect con_purge;
+disconnect con1;
+connection default;
+drop table t1;
+SET DEBUG_SYNC='RESET';

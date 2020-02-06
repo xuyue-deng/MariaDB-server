@@ -5136,19 +5136,18 @@ It is assumed that the mtr has an x-latch on the page where the cursor is
 positioned, but no latch on the whole tree.
 @return TRUE if success, i.e., the page did not become too empty */
 ibool
-btr_cur_optimistic_delete_func(
+btr_cur_optimistic_delete(
 /*===========================*/
 	btr_cur_t*	cursor,	/*!< in: cursor on leaf page, on the record to
 				delete; cursor stays valid: if deletion
 				succeeds, on function exit it points to the
 				successor of the deleted record */
-#ifdef UNIV_DEBUG
 	ulint		flags,	/*!< in: BTR_CREATE_FLAG or 0 */
-#endif /* UNIV_DEBUG */
-	mtr_t*		mtr)	/*!< in: mtr; if this function returns
+	mtr_t*		mtr,	/*!< in: mtr; if this function returns
 				TRUE on a leaf page of a secondary
 				index, the mtr must be committed
 				before latching any further pages */
+	bool interesting)
 {
 	buf_block_t*	block;
 	rec_t*		rec;
@@ -5187,7 +5186,7 @@ btr_cur_optimistic_delete_func(
 		page_t*		page	= buf_block_get_frame(block);
 		page_zip_des_t*	page_zip= buf_block_get_page_zip(block);
 
-		lock_update_delete(block, rec);
+		lock_update_delete(block, rec, interesting);
 
 		btr_search_update_hash_on_delete(cursor);
 
@@ -5263,7 +5262,8 @@ btr_cur_pessimistic_delete(
 				deleted record on function exit */
 	ulint		flags,	/*!< in: BTR_CREATE_FLAG or 0 */
 	bool		rollback,/*!< in: performing rollback? */
-	mtr_t*		mtr)	/*!< in: mtr */
+	mtr_t*		mtr,	/*!< in: mtr */
+	bool		interesting)
 {
 	buf_block_t*	block;
 	page_t*		page;
@@ -5339,7 +5339,7 @@ btr_cur_pessimistic_delete(
 		ut_ad(!(rec_get_info_bits(rec, page_rec_is_comp(rec))
 			& REC_INFO_MIN_REC_FLAG));
 		if (flags == 0) {
-			lock_update_delete(block, rec);
+			lock_update_delete(block, rec, interesting);
 		}
 	}
 

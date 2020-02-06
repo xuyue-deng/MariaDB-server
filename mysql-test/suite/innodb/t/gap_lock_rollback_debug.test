@@ -1,0 +1,21 @@
+--source include/have_innodb.inc
+
+create table t(k tinyint unsigned primary key) engine=innodb;
+
+insert into t values (10), (40);
+
+begin;
+insert into t values (30);
+
+connect (con1,localhost,root,,);
+set transaction isolation level serializable;
+begin;
+select * from t where k = 20;
+
+connection default;
+rollback;
+
+connect (con2,localhost,root,,);
+insert into t values (35);
+
+
