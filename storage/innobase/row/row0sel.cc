@@ -73,6 +73,8 @@ to que_run_threads: this is to allow canceling runaway queries */
 #define	SEL_EXHAUSTED	1
 #define SEL_RETRY	2
 
+enum gap_lock_direction { NONE, FORWARD, BACKWARD };
+
 /********************************************************************//**
 Returns TRUE if the user-defined column in a secondary index record
 is alphabetically the same as the corresponding BLOB column in the clustered
@@ -1584,6 +1586,9 @@ row_sel(
 	rec_t*		old_vers;
 	rec_t*		clust_rec;
 	ibool		consistent_read;
+	ulint	lock_type;
+	gap_lock_direction gl_dir = NONE;
+	btr_pcur_t	gap_lock_init_pcur;
 
 	/* The following flag becomes TRUE when we are doing a
 	consistent read from a non-clustered index and we must look
@@ -1781,7 +1786,12 @@ rec_loop:
 				}
 
 				lock_type = LOCK_REC_NOT_GAP;
-			} else {
+			} else
+			/* There is no need to do this for delete-marked records as the gap
+			will be extended in both directions */
+			if (rec_get_deleted_flag(rec, dict_table_is_comp(plan->table)))
+				goto skip_lock;
+			else {
 				lock_type = LOCK_ORDINARY;
 			}
 
@@ -1820,7 +1830,6 @@ skip_lock:
 
 	if (!consistent_read) {
 		/* Try to place a lock on the index record */
-		ulint	lock_type;
 		trx_t*	trx;
 
 		offsets = rec_get_offsets(rec, index, offsets, true,
@@ -1845,20 +1854,47 @@ skip_lock:
 		} else {
 			lock_type = LOCK_ORDINARY;
 		}
+		if (gl_dir == NONE
+				|| node->asc
+				|| rec_get_deleted_flag(rec, dict_table_is_comp(plan->table))) {
+			err = sel_set_rec_lock(&plan->pcur,
+								 rec, index, offsets,
+								 node->row_lock_mode, lock_type,
+								 thr, &mtr);
 
-		err = sel_set_rec_lock(&plan->pcur,
-				       rec, index, offsets,
-				       node->row_lock_mode, lock_type,
-				       thr, &mtr);
-
-		switch (err) {
-		case DB_SUCCESS_LOCKED_REC:
-			err = DB_SUCCESS;
-			/* fall through */
-		case DB_SUCCESS:
-			break;
-		default:
-			goto lock_wait_or_error;
+			switch (err) {
+			case DB_SUCCESS_LOCKED_REC:
+				err = DB_SUCCESS;
+				/* fall through */
+			case DB_SUCCESS:
+				break;
+			default:
+				goto lock_wait_or_error;
+			}
+		}
+		if (lock_type != LOCK_REC_NOT_GAP
+				&& rec_get_deleted_flag(rec, dict_table_is_comp(plan->table))) {
+			if (gl_dir == NONE
+					&& cursor_just_opened
+					&& !dict_index_is_spatial(index)) {
+				gl_dir = BACKWARD;
+				node->asc = !node->asc;
+				btr_pcur_store_position(&(plan->pcur), &mtr);
+				btr_pcur_copy_stored_position(&gap_lock_init_pcur, &(plan->pcur));
+			}
+			goto next_rec;
+		} else {
+			if (gl_dir == BACKWARD) {
+change_gl_dir:
+				mtr.commit();
+				mtr.start();
+				btr_pcur_copy_stored_position(&(plan->pcur), &gap_lock_init_pcur);
+				btr_pcur_restore_position(BTR_SEARCH_LEAF, &(plan->pcur), &mtr);
+				btr_pcur_free(&gap_lock_init_pcur);
+				gl_dir = FORWARD;
+				node->asc = !node->asc;
+				goto next_rec;
+			}
 		}
 	}
 
@@ -2122,7 +2158,8 @@ next_rec:
 	}
 
 	if (!moved) {
-
+		if (gl_dir == BACKWARD)
+			goto change_gl_dir;
 		goto table_exhausted;
 	}
 
@@ -4266,8 +4303,6 @@ bool row_search_with_covering_prefix(
 	srv_stats.n_sec_rec_cluster_reads_avoided.inc();
 	return true;
 }
-
-enum gap_lock_direction { NONE, FORWARD, BACKWARD };
 
 /** Searches for rows in the database using cursor.
 Function is mainly used for tables that are shared across connections and
