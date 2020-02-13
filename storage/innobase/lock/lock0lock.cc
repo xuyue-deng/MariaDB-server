@@ -3521,7 +3521,7 @@ lock_update_delete(
 	lock_mutex_enter();
 
 	/* Let the next record inherit the locks from rec, in gap mode */
-//	if (!interesting)
+	if (!interesting)
 		lock_rec_inherit_to_gap(block, block, next_heap_no, heap_no, interesting);
 
 	/* Reset the lock bits on rec and release waiting transactions */
