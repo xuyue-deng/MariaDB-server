@@ -1,5 +1,6 @@
 --source include/have_innodb.inc
 --source include/have_sequence.inc
+--source include/have_debug.inc
 
 SET @saved_frequency = @@GLOBAL.innodb_purge_rseg_truncate_frequency;
 SET GLOBAL innodb_purge_rseg_truncate_frequency = 1;
@@ -27,10 +28,17 @@ create table t(a int unsigned primary key,
                b int unsigned,
                index b (b)) engine=innodb;
 
+#SET GLOBAL innodb_debug_que_eval_sql = "qweqw";
+#--exit
+
 connect (prevent_purge,localhost,root,,);
 start transaction with consistent snapshot;
 
 connection default;
+
+--echo #
+--echo # Insert data, create several ranges of delete-marked records
+--echo #
 
 begin;
 --eval insert into t select seq*10, seq*10 from seq_1_to_$max_records
@@ -53,6 +61,7 @@ SET @pg = @pg + @pg_gap + @pg_not_gap;
 --dec $i
 }
 commit;
+# Test for check table, it can fail if there are errors in row_search_mvcc()
 check table t;
 begin;
 
@@ -75,7 +84,13 @@ set transaction isolation level read committed;
 if ($isolation_level == $read_uncommitted) {
 set transaction isolation level read uncommitted;
 }
+
+--echo #
+--echo # Create gap locks for the corresponding isolation levels
+--echo #
+
 begin;
+# Test for correctness of bidirectional locking for infinum and supremum
 --eval SELECT * FROM t WHERE a = 50 $for_update
 --eval SELECT * FROM t WHERE a = ($max_records * 10) - 50 $for_update
 
@@ -112,7 +127,7 @@ eval SELECT * FROM t WHERE a between
 SET @pg = @pg + @pg_gap + @pg_not_gap;
 --eval SELECT * FROM t WHERE a between @pg - 20 and @pg + 20 $for_update
 
-#overlap the gap from the right
+# overlap the gap from the right
 SET @pg = @pg + @pg_gap + @pg_not_gap;
 eval SELECT * FROM t WHERE a between @pg + @pg_gap - 20 and @pg + @pg_gap + 20
   $for_update;
@@ -123,27 +138,46 @@ SET session innodb_lock_wait_timeout=1;
 
 if ($isolation_level >= $serializable) {
 
+--echo #
+--echo # Check if locks were SET properly
+--echo #
+
+# Check for supremum/infinum
 --error ER_LOCK_WAIT_TIMEOUT
 insert into t values(5, 5);
 --error ER_LOCK_WAIT_TIMEOUT
 --eval insert into t values(($max_records * 10) - 5, ($max_records * 10) - 5)
 
-
 --eval SET @pg = $pg_val
+--echo # Check for the following cases:
+--echo # 1) match_mode == ROW_SEL_EXACT
+--echo #    && 0 != cmp_dtuple_rec(search_tuple, rec, offsets)
+--echo # 2) match_mode == ROW_SEL_EXACT_PREFIX
+--echo #    && 0 != cmp_dtuple_rec(search_tuple, rec, offsets)
+--echo # 3) match_mode == ROW_SEL_EXACT
+--echo #    && 0 == cmp_dtuple_rec(search_tuple, rec, offsets)
+--echo # 4) match_mode == ROW_SEL_EXACT_PREFIX
+--echo #    && 0 == cmp_dtuple_rec(search_tuple, rec, offsets)
+--echo # 5) inside of gap
 --let $i = 5
 
 while ($i) {
+# inserts outside of delete-market range must be ok
 insert into t values(@pg - 15, @pg - 15);
 insert into t values(@pg + @pg_gap + 15, @pg + @pg_gap + 15);
 
+# check the start and the end of the range
 --error ER_LOCK_WAIT_TIMEOUT
 insert into t values(@pg + 5, @pg + 5);
 --error ER_LOCK_WAIT_TIMEOUT
 insert into t values(@pg + @pg_gap - 5, @pg + @pg_gap - 5);
 SET @pg = @pg + @pg_gap + @pg_not_gap;
 --dec $i
-}
+} # while ($i)
 
+--echo #
+--echo # check for overlap the gap from the left
+--echo #
 insert into t values(@pg - 20 - 15, @pg - 20 - 15);
 insert into t values(@pg + @pg_gap + 15, @pg + @pg_gap + 15);
 --error ER_LOCK_WAIT_TIMEOUT
@@ -152,6 +186,9 @@ insert into t values(@pg - 5, @pg - 5);
 insert into t values(@pg + @pg_gap - 5, @pg + @pg_gap - 5);
 SET @pg = @pg + @pg_gap + @pg_not_gap;
 
+--echo #
+--echo # check for overlap the gap from the right
+--echo #
 insert into t values(@pg - 15, @pg - 15);
 insert into t values(@pg + @pg_gap + 20 + 15, @pg + @pg_gap + 20 + 15);
 --error ER_LOCK_WAIT_TIMEOUT
@@ -159,39 +196,59 @@ insert into t values(@pg + 5, @pg + 5);
 --error ER_LOCK_WAIT_TIMEOUT
 insert into t values(@pg + @pg_gap + 20 - 5, @pg + @pg_gap + 20 - 5);
 SET @pg = @pg + @pg_gap + @pg_not_gap;
-}
+} # if ($isolation_level >= $serializable)
 
 
 if ($isolation_level < $serializable) {
-
+--echo #
+--echo # Check if locks were NOT SET
+--echo #
 insert into t values(5, 5);
 --eval insert into t values(($max_records * 10) - 5, ($max_records * 10) - 5)
 
 --eval SET @pg = $pg_val
+--echo # Check for the following cases:
+--echo # 1) match_mode == ROW_SEL_EXACT
+--echo #    && 0 != cmp_dtuple_rec(search_tuple, rec, offsets)
+--echo # 2) match_mode == ROW_SEL_EXACT_PREFIX
+--echo #    && 0 != cmp_dtuple_rec(search_tuple, rec, offsets)
+--echo # 3) match_mode == ROW_SEL_EXACT
+--echo #    && 0 == cmp_dtuple_rec(search_tuple, rec, offsets)
+--echo # 4) match_mode == ROW_SEL_EXACT_PREFIX
+--echo #    && 0 == cmp_dtuple_rec(search_tuple, rec, offsets)
+--echo # 5) inside of gap
 --let $i = 5
 
 while ($i) {
+# inserts outside of delete-market range must be ok
 insert into t values(@pg - 15, @pg - 15);
 insert into t values(@pg + @pg_gap + 15, @pg + @pg_gap + 15);
 
+# check the start and the end of the range
 insert into t values(@pg + 5, @pg + 5);
 insert into t values(@pg + @pg_gap - 5, @pg + @pg_gap - 5);
 SET @pg = @pg + @pg_gap + @pg_not_gap;
 --dec $i
-}
+} # while ($i)
 
+--echo #
+--echo # check for overlap the gap from the left
+--echo #
 insert into t values(@pg - 20 - 15, @pg - 20 - 15);
 insert into t values(@pg + @pg_gap + 15, @pg + @pg_gap + 15);
 insert into t values(@pg - 5, @pg - 5);
 insert into t values(@pg + @pg_gap - 5, @pg + @pg_gap - 5);
 SET @pg = @pg + @pg_gap + @pg_not_gap;
 
+--echo #
+--echo # check for overlap the gap from the right
+--echo #
 insert into t values(@pg - 15, @pg - 15);
 insert into t values(@pg + @pg_gap + 20 + 15, @pg + @pg_gap + 20 + 15);
 insert into t values(@pg + 5, @pg + 5);
 insert into t values(@pg + @pg_gap + 20 - 5, @pg + @pg_gap + 20 - 5);
 SET @pg = @pg + @pg_gap + @pg_not_gap;
-}
+} # if ($isolation_level < $serializable)
 
 
 disconnect prevent_purge;
@@ -200,5 +257,6 @@ connection default;
 rollback;
 drop table t;
 --dec $isolation_level
-}
+} # while ($isolation_level)
+
 SET GLOBAL innodb_purge_rseg_truncate_frequency = @saved_frequency;

@@ -1,0 +1,744 @@
+SET @saved_frequency = @@GLOBAL.innodb_purge_rseg_truncate_frequency;
+SET GLOBAL innodb_purge_rseg_truncate_frequency = 1;
+##########
+# test for isolation level 5
+###
+create table t(a int unsigned primary key,
+b int unsigned,
+index b (b)) engine=innodb;
+connect  prevent_purge,localhost,root,,;
+start transaction with consistent snapshot;
+connection default;
+#
+# Insert data, create several ranges of delete-marked records
+#
+begin;
+insert into t select seq*10, seq*10 from seq_1_to_130000;
+delete from t where a < 100;
+delete from t where a > ((130000 * 10) - 100);
+SET @pg = (2048 * 10);
+SET @pg_gap = ((2048 * 10)*6);
+SET @pg_not_gap = ((2048 * 10)*2);
+delete from t where a between @pg and @pg + @pg_gap;
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+delete from t where a between @pg and @pg + @pg_gap;
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+delete from t where a between @pg and @pg + @pg_gap;
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+delete from t where a between @pg and @pg + @pg_gap;
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+delete from t where a between @pg and @pg + @pg_gap;
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+delete from t where a between @pg and @pg + @pg_gap;
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+delete from t where a between @pg and @pg + @pg_gap;
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+commit;
+check table t;
+Table	Op	Msg_type	Msg_text
+test.t	check	status	OK
+begin;
+connect  con1,localhost,root,,;
+#
+# Create gap locks for the corresponding isolation levels
+#
+begin;
+SELECT * FROM t WHERE a = 50 FOR UPDATE;
+a	b
+SELECT * FROM t WHERE a = (130000 * 10) - 50 FOR UPDATE;
+a	b
+SET @pg = (2048 * 10);
+SET @pg_gap = ((2048 * 10)*6);
+SET @pg_not_gap = ((2048 * 10)*2);
+select * from t where a = @pg + (@pg_gap/2) + 5 FOR UPDATE;
+a	b
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+SELECT * FROM t WHERE b = @pg + (@pg_gap/2) + 5 ORDER BY a DESC
+FOR UPDATE;
+a	b
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+select * from t where a = @pg + (@pg_gap/2) FOR UPDATE;
+a	b
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+SELECT * FROM t WHERE b = @pg + (@pg_gap/2) ORDER BY a DESC FOR UPDATE;
+a	b
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+SELECT * FROM t WHERE a between
+@pg + (@pg_gap/2) - 20 and @pg + (@pg_gap/2) + 20 FOR UPDATE;
+a	b
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+SELECT * FROM t WHERE a between @pg - 20 and @pg + 20 FOR UPDATE;
+a	b
+839660	839660
+839670	839670
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+SELECT * FROM t WHERE a between @pg + @pg_gap - 20 and @pg + @pg_gap + 20
+FOR UPDATE;
+a	b
+1126410	1126410
+1126420	1126420
+connection default;
+SET session innodb_lock_wait_timeout=1;
+#
+# Check if locks were SET properly
+#
+insert into t values(5, 5);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+insert into t values((130000 * 10) - 5, (130000 * 10) - 5);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+SET @pg = (2048 * 10);
+# Check for the following cases:
+# 1) match_mode == ROW_SEL_EXACT
+#    && 0 != cmp_dtuple_rec(search_tuple, rec, offsets)
+# 2) match_mode == ROW_SEL_EXACT_PREFIX
+#    && 0 != cmp_dtuple_rec(search_tuple, rec, offsets)
+# 3) match_mode == ROW_SEL_EXACT
+#    && 0 == cmp_dtuple_rec(search_tuple, rec, offsets)
+# 4) match_mode == ROW_SEL_EXACT_PREFIX
+#    && 0 == cmp_dtuple_rec(search_tuple, rec, offsets)
+# 5) inside of gap
+insert into t values(@pg - 15, @pg - 15);
+insert into t values(@pg + @pg_gap + 15, @pg + @pg_gap + 15);
+insert into t values(@pg + 5, @pg + 5);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+insert into t values(@pg + @pg_gap - 5, @pg + @pg_gap - 5);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+insert into t values(@pg - 15, @pg - 15);
+insert into t values(@pg + @pg_gap + 15, @pg + @pg_gap + 15);
+insert into t values(@pg + 5, @pg + 5);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+insert into t values(@pg + @pg_gap - 5, @pg + @pg_gap - 5);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+insert into t values(@pg - 15, @pg - 15);
+insert into t values(@pg + @pg_gap + 15, @pg + @pg_gap + 15);
+insert into t values(@pg + 5, @pg + 5);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+insert into t values(@pg + @pg_gap - 5, @pg + @pg_gap - 5);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+insert into t values(@pg - 15, @pg - 15);
+insert into t values(@pg + @pg_gap + 15, @pg + @pg_gap + 15);
+insert into t values(@pg + 5, @pg + 5);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+insert into t values(@pg + @pg_gap - 5, @pg + @pg_gap - 5);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+insert into t values(@pg - 15, @pg - 15);
+insert into t values(@pg + @pg_gap + 15, @pg + @pg_gap + 15);
+insert into t values(@pg + 5, @pg + 5);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+insert into t values(@pg + @pg_gap - 5, @pg + @pg_gap - 5);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+#
+# check for overlap the gap from the left
+#
+insert into t values(@pg - 20 - 15, @pg - 20 - 15);
+insert into t values(@pg + @pg_gap + 15, @pg + @pg_gap + 15);
+insert into t values(@pg - 5, @pg - 5);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+insert into t values(@pg + @pg_gap - 5, @pg + @pg_gap - 5);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+#
+# check for overlap the gap from the right
+#
+insert into t values(@pg - 15, @pg - 15);
+insert into t values(@pg + @pg_gap + 20 + 15, @pg + @pg_gap + 20 + 15);
+insert into t values(@pg + 5, @pg + 5);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+insert into t values(@pg + @pg_gap + 20 - 5, @pg + @pg_gap + 20 - 5);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+disconnect prevent_purge;
+disconnect con1;
+connection default;
+rollback;
+drop table t;
+##########
+# test for isolation level 4
+###
+create table t(a int unsigned primary key,
+b int unsigned,
+index b (b)) engine=innodb;
+connect  prevent_purge,localhost,root,,;
+start transaction with consistent snapshot;
+connection default;
+#
+# Insert data, create several ranges of delete-marked records
+#
+begin;
+insert into t select seq*10, seq*10 from seq_1_to_130000;
+delete from t where a < 100;
+delete from t where a > ((130000 * 10) - 100);
+SET @pg = (2048 * 10);
+SET @pg_gap = ((2048 * 10)*6);
+SET @pg_not_gap = ((2048 * 10)*2);
+delete from t where a between @pg and @pg + @pg_gap;
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+delete from t where a between @pg and @pg + @pg_gap;
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+delete from t where a between @pg and @pg + @pg_gap;
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+delete from t where a between @pg and @pg + @pg_gap;
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+delete from t where a between @pg and @pg + @pg_gap;
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+delete from t where a between @pg and @pg + @pg_gap;
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+delete from t where a between @pg and @pg + @pg_gap;
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+commit;
+check table t;
+Table	Op	Msg_type	Msg_text
+test.t	check	status	OK
+begin;
+connect  con1,localhost,root,,;
+set transaction isolation level serializable;
+#
+# Create gap locks for the corresponding isolation levels
+#
+begin;
+SELECT * FROM t WHERE a = 50 ;
+a	b
+SELECT * FROM t WHERE a = (130000 * 10) - 50 ;
+a	b
+SET @pg = (2048 * 10);
+SET @pg_gap = ((2048 * 10)*6);
+SET @pg_not_gap = ((2048 * 10)*2);
+select * from t where a = @pg + (@pg_gap/2) + 5 ;
+a	b
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+SELECT * FROM t WHERE b = @pg + (@pg_gap/2) + 5 ORDER BY a DESC
+;
+a	b
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+select * from t where a = @pg + (@pg_gap/2) ;
+a	b
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+SELECT * FROM t WHERE b = @pg + (@pg_gap/2) ORDER BY a DESC ;
+a	b
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+SELECT * FROM t WHERE a between
+@pg + (@pg_gap/2) - 20 and @pg + (@pg_gap/2) + 20 ;
+a	b
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+SELECT * FROM t WHERE a between @pg - 20 and @pg + 20 ;
+a	b
+839660	839660
+839670	839670
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+SELECT * FROM t WHERE a between @pg + @pg_gap - 20 and @pg + @pg_gap + 20
+;
+a	b
+1126410	1126410
+1126420	1126420
+connection default;
+SET session innodb_lock_wait_timeout=1;
+#
+# Check if locks were SET properly
+#
+insert into t values(5, 5);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+insert into t values((130000 * 10) - 5, (130000 * 10) - 5);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+SET @pg = (2048 * 10);
+# Check for the following cases:
+# 1) match_mode == ROW_SEL_EXACT
+#    && 0 != cmp_dtuple_rec(search_tuple, rec, offsets)
+# 2) match_mode == ROW_SEL_EXACT_PREFIX
+#    && 0 != cmp_dtuple_rec(search_tuple, rec, offsets)
+# 3) match_mode == ROW_SEL_EXACT
+#    && 0 == cmp_dtuple_rec(search_tuple, rec, offsets)
+# 4) match_mode == ROW_SEL_EXACT_PREFIX
+#    && 0 == cmp_dtuple_rec(search_tuple, rec, offsets)
+# 5) inside of gap
+insert into t values(@pg - 15, @pg - 15);
+insert into t values(@pg + @pg_gap + 15, @pg + @pg_gap + 15);
+insert into t values(@pg + 5, @pg + 5);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+insert into t values(@pg + @pg_gap - 5, @pg + @pg_gap - 5);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+insert into t values(@pg - 15, @pg - 15);
+insert into t values(@pg + @pg_gap + 15, @pg + @pg_gap + 15);
+insert into t values(@pg + 5, @pg + 5);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+insert into t values(@pg + @pg_gap - 5, @pg + @pg_gap - 5);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+insert into t values(@pg - 15, @pg - 15);
+insert into t values(@pg + @pg_gap + 15, @pg + @pg_gap + 15);
+insert into t values(@pg + 5, @pg + 5);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+insert into t values(@pg + @pg_gap - 5, @pg + @pg_gap - 5);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+insert into t values(@pg - 15, @pg - 15);
+insert into t values(@pg + @pg_gap + 15, @pg + @pg_gap + 15);
+insert into t values(@pg + 5, @pg + 5);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+insert into t values(@pg + @pg_gap - 5, @pg + @pg_gap - 5);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+insert into t values(@pg - 15, @pg - 15);
+insert into t values(@pg + @pg_gap + 15, @pg + @pg_gap + 15);
+insert into t values(@pg + 5, @pg + 5);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+insert into t values(@pg + @pg_gap - 5, @pg + @pg_gap - 5);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+#
+# check for overlap the gap from the left
+#
+insert into t values(@pg - 20 - 15, @pg - 20 - 15);
+insert into t values(@pg + @pg_gap + 15, @pg + @pg_gap + 15);
+insert into t values(@pg - 5, @pg - 5);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+insert into t values(@pg + @pg_gap - 5, @pg + @pg_gap - 5);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+#
+# check for overlap the gap from the right
+#
+insert into t values(@pg - 15, @pg - 15);
+insert into t values(@pg + @pg_gap + 20 + 15, @pg + @pg_gap + 20 + 15);
+insert into t values(@pg + 5, @pg + 5);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+insert into t values(@pg + @pg_gap + 20 - 5, @pg + @pg_gap + 20 - 5);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+disconnect prevent_purge;
+disconnect con1;
+connection default;
+rollback;
+drop table t;
+##########
+# test for isolation level 3
+###
+create table t(a int unsigned primary key,
+b int unsigned,
+index b (b)) engine=innodb;
+connect  prevent_purge,localhost,root,,;
+start transaction with consistent snapshot;
+connection default;
+#
+# Insert data, create several ranges of delete-marked records
+#
+begin;
+insert into t select seq*10, seq*10 from seq_1_to_130000;
+delete from t where a < 100;
+delete from t where a > ((130000 * 10) - 100);
+SET @pg = (2048 * 10);
+SET @pg_gap = ((2048 * 10)*6);
+SET @pg_not_gap = ((2048 * 10)*2);
+delete from t where a between @pg and @pg + @pg_gap;
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+delete from t where a between @pg and @pg + @pg_gap;
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+delete from t where a between @pg and @pg + @pg_gap;
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+delete from t where a between @pg and @pg + @pg_gap;
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+delete from t where a between @pg and @pg + @pg_gap;
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+delete from t where a between @pg and @pg + @pg_gap;
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+delete from t where a between @pg and @pg + @pg_gap;
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+commit;
+check table t;
+Table	Op	Msg_type	Msg_text
+test.t	check	status	OK
+begin;
+connect  con1,localhost,root,,;
+set transaction isolation level repeatable read;
+#
+# Create gap locks for the corresponding isolation levels
+#
+begin;
+SELECT * FROM t WHERE a = 50 ;
+a	b
+SELECT * FROM t WHERE a = (130000 * 10) - 50 ;
+a	b
+SET @pg = (2048 * 10);
+SET @pg_gap = ((2048 * 10)*6);
+SET @pg_not_gap = ((2048 * 10)*2);
+select * from t where a = @pg + (@pg_gap/2) + 5 ;
+a	b
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+SELECT * FROM t WHERE b = @pg + (@pg_gap/2) + 5 ORDER BY a DESC
+;
+a	b
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+select * from t where a = @pg + (@pg_gap/2) ;
+a	b
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+SELECT * FROM t WHERE b = @pg + (@pg_gap/2) ORDER BY a DESC ;
+a	b
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+SELECT * FROM t WHERE a between
+@pg + (@pg_gap/2) - 20 and @pg + (@pg_gap/2) + 20 ;
+a	b
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+SELECT * FROM t WHERE a between @pg - 20 and @pg + 20 ;
+a	b
+839660	839660
+839670	839670
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+SELECT * FROM t WHERE a between @pg + @pg_gap - 20 and @pg + @pg_gap + 20
+;
+a	b
+1126410	1126410
+1126420	1126420
+connection default;
+SET session innodb_lock_wait_timeout=1;
+#
+# Check if locks were NOT SET
+#
+insert into t values(5, 5);
+insert into t values((130000 * 10) - 5, (130000 * 10) - 5);
+SET @pg = (2048 * 10);
+# Check for the following cases:
+# 1) match_mode == ROW_SEL_EXACT
+#    && 0 != cmp_dtuple_rec(search_tuple, rec, offsets)
+# 2) match_mode == ROW_SEL_EXACT_PREFIX
+#    && 0 != cmp_dtuple_rec(search_tuple, rec, offsets)
+# 3) match_mode == ROW_SEL_EXACT
+#    && 0 == cmp_dtuple_rec(search_tuple, rec, offsets)
+# 4) match_mode == ROW_SEL_EXACT_PREFIX
+#    && 0 == cmp_dtuple_rec(search_tuple, rec, offsets)
+# 5) inside of gap
+insert into t values(@pg - 15, @pg - 15);
+insert into t values(@pg + @pg_gap + 15, @pg + @pg_gap + 15);
+insert into t values(@pg + 5, @pg + 5);
+insert into t values(@pg + @pg_gap - 5, @pg + @pg_gap - 5);
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+insert into t values(@pg - 15, @pg - 15);
+insert into t values(@pg + @pg_gap + 15, @pg + @pg_gap + 15);
+insert into t values(@pg + 5, @pg + 5);
+insert into t values(@pg + @pg_gap - 5, @pg + @pg_gap - 5);
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+insert into t values(@pg - 15, @pg - 15);
+insert into t values(@pg + @pg_gap + 15, @pg + @pg_gap + 15);
+insert into t values(@pg + 5, @pg + 5);
+insert into t values(@pg + @pg_gap - 5, @pg + @pg_gap - 5);
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+insert into t values(@pg - 15, @pg - 15);
+insert into t values(@pg + @pg_gap + 15, @pg + @pg_gap + 15);
+insert into t values(@pg + 5, @pg + 5);
+insert into t values(@pg + @pg_gap - 5, @pg + @pg_gap - 5);
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+insert into t values(@pg - 15, @pg - 15);
+insert into t values(@pg + @pg_gap + 15, @pg + @pg_gap + 15);
+insert into t values(@pg + 5, @pg + 5);
+insert into t values(@pg + @pg_gap - 5, @pg + @pg_gap - 5);
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+#
+# check for overlap the gap from the left
+#
+insert into t values(@pg - 20 - 15, @pg - 20 - 15);
+insert into t values(@pg + @pg_gap + 15, @pg + @pg_gap + 15);
+insert into t values(@pg - 5, @pg - 5);
+insert into t values(@pg + @pg_gap - 5, @pg + @pg_gap - 5);
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+#
+# check for overlap the gap from the right
+#
+insert into t values(@pg - 15, @pg - 15);
+insert into t values(@pg + @pg_gap + 20 + 15, @pg + @pg_gap + 20 + 15);
+insert into t values(@pg + 5, @pg + 5);
+insert into t values(@pg + @pg_gap + 20 - 5, @pg + @pg_gap + 20 - 5);
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+disconnect prevent_purge;
+disconnect con1;
+connection default;
+rollback;
+drop table t;
+##########
+# test for isolation level 2
+###
+create table t(a int unsigned primary key,
+b int unsigned,
+index b (b)) engine=innodb;
+connect  prevent_purge,localhost,root,,;
+start transaction with consistent snapshot;
+connection default;
+#
+# Insert data, create several ranges of delete-marked records
+#
+begin;
+insert into t select seq*10, seq*10 from seq_1_to_130000;
+delete from t where a < 100;
+delete from t where a > ((130000 * 10) - 100);
+SET @pg = (2048 * 10);
+SET @pg_gap = ((2048 * 10)*6);
+SET @pg_not_gap = ((2048 * 10)*2);
+delete from t where a between @pg and @pg + @pg_gap;
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+delete from t where a between @pg and @pg + @pg_gap;
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+delete from t where a between @pg and @pg + @pg_gap;
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+delete from t where a between @pg and @pg + @pg_gap;
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+delete from t where a between @pg and @pg + @pg_gap;
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+delete from t where a between @pg and @pg + @pg_gap;
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+delete from t where a between @pg and @pg + @pg_gap;
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+commit;
+check table t;
+Table	Op	Msg_type	Msg_text
+test.t	check	status	OK
+begin;
+connect  con1,localhost,root,,;
+set transaction isolation level read committed;
+#
+# Create gap locks for the corresponding isolation levels
+#
+begin;
+SELECT * FROM t WHERE a = 50 ;
+a	b
+SELECT * FROM t WHERE a = (130000 * 10) - 50 ;
+a	b
+SET @pg = (2048 * 10);
+SET @pg_gap = ((2048 * 10)*6);
+SET @pg_not_gap = ((2048 * 10)*2);
+select * from t where a = @pg + (@pg_gap/2) + 5 ;
+a	b
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+SELECT * FROM t WHERE b = @pg + (@pg_gap/2) + 5 ORDER BY a DESC
+;
+a	b
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+select * from t where a = @pg + (@pg_gap/2) ;
+a	b
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+SELECT * FROM t WHERE b = @pg + (@pg_gap/2) ORDER BY a DESC ;
+a	b
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+SELECT * FROM t WHERE a between
+@pg + (@pg_gap/2) - 20 and @pg + (@pg_gap/2) + 20 ;
+a	b
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+SELECT * FROM t WHERE a between @pg - 20 and @pg + 20 ;
+a	b
+839660	839660
+839670	839670
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+SELECT * FROM t WHERE a between @pg + @pg_gap - 20 and @pg + @pg_gap + 20
+;
+a	b
+1126410	1126410
+1126420	1126420
+connection default;
+SET session innodb_lock_wait_timeout=1;
+#
+# Check if locks were NOT SET
+#
+insert into t values(5, 5);
+insert into t values((130000 * 10) - 5, (130000 * 10) - 5);
+SET @pg = (2048 * 10);
+# Check for the following cases:
+# 1) match_mode == ROW_SEL_EXACT
+#    && 0 != cmp_dtuple_rec(search_tuple, rec, offsets)
+# 2) match_mode == ROW_SEL_EXACT_PREFIX
+#    && 0 != cmp_dtuple_rec(search_tuple, rec, offsets)
+# 3) match_mode == ROW_SEL_EXACT
+#    && 0 == cmp_dtuple_rec(search_tuple, rec, offsets)
+# 4) match_mode == ROW_SEL_EXACT_PREFIX
+#    && 0 == cmp_dtuple_rec(search_tuple, rec, offsets)
+# 5) inside of gap
+insert into t values(@pg - 15, @pg - 15);
+insert into t values(@pg + @pg_gap + 15, @pg + @pg_gap + 15);
+insert into t values(@pg + 5, @pg + 5);
+insert into t values(@pg + @pg_gap - 5, @pg + @pg_gap - 5);
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+insert into t values(@pg - 15, @pg - 15);
+insert into t values(@pg + @pg_gap + 15, @pg + @pg_gap + 15);
+insert into t values(@pg + 5, @pg + 5);
+insert into t values(@pg + @pg_gap - 5, @pg + @pg_gap - 5);
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+insert into t values(@pg - 15, @pg - 15);
+insert into t values(@pg + @pg_gap + 15, @pg + @pg_gap + 15);
+insert into t values(@pg + 5, @pg + 5);
+insert into t values(@pg + @pg_gap - 5, @pg + @pg_gap - 5);
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+insert into t values(@pg - 15, @pg - 15);
+insert into t values(@pg + @pg_gap + 15, @pg + @pg_gap + 15);
+insert into t values(@pg + 5, @pg + 5);
+insert into t values(@pg + @pg_gap - 5, @pg + @pg_gap - 5);
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+insert into t values(@pg - 15, @pg - 15);
+insert into t values(@pg + @pg_gap + 15, @pg + @pg_gap + 15);
+insert into t values(@pg + 5, @pg + 5);
+insert into t values(@pg + @pg_gap - 5, @pg + @pg_gap - 5);
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+#
+# check for overlap the gap from the left
+#
+insert into t values(@pg - 20 - 15, @pg - 20 - 15);
+insert into t values(@pg + @pg_gap + 15, @pg + @pg_gap + 15);
+insert into t values(@pg - 5, @pg - 5);
+insert into t values(@pg + @pg_gap - 5, @pg + @pg_gap - 5);
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+#
+# check for overlap the gap from the right
+#
+insert into t values(@pg - 15, @pg - 15);
+insert into t values(@pg + @pg_gap + 20 + 15, @pg + @pg_gap + 20 + 15);
+insert into t values(@pg + 5, @pg + 5);
+insert into t values(@pg + @pg_gap + 20 - 5, @pg + @pg_gap + 20 - 5);
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+disconnect prevent_purge;
+disconnect con1;
+connection default;
+rollback;
+drop table t;
+##########
+# test for isolation level 1
+###
+create table t(a int unsigned primary key,
+b int unsigned,
+index b (b)) engine=innodb;
+connect  prevent_purge,localhost,root,,;
+start transaction with consistent snapshot;
+connection default;
+#
+# Insert data, create several ranges of delete-marked records
+#
+begin;
+insert into t select seq*10, seq*10 from seq_1_to_130000;
+delete from t where a < 100;
+delete from t where a > ((130000 * 10) - 100);
+SET @pg = (2048 * 10);
+SET @pg_gap = ((2048 * 10)*6);
+SET @pg_not_gap = ((2048 * 10)*2);
+delete from t where a between @pg and @pg + @pg_gap;
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+delete from t where a between @pg and @pg + @pg_gap;
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+delete from t where a between @pg and @pg + @pg_gap;
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+delete from t where a between @pg and @pg + @pg_gap;
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+delete from t where a between @pg and @pg + @pg_gap;
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+delete from t where a between @pg and @pg + @pg_gap;
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+delete from t where a between @pg and @pg + @pg_gap;
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+commit;
+check table t;
+Table	Op	Msg_type	Msg_text
+test.t	check	status	OK
+begin;
+connect  con1,localhost,root,,;
+set transaction isolation level read uncommitted;
+#
+# Create gap locks for the corresponding isolation levels
+#
+begin;
+SELECT * FROM t WHERE a = 50 ;
+a	b
+SELECT * FROM t WHERE a = (130000 * 10) - 50 ;
+a	b
+SET @pg = (2048 * 10);
+SET @pg_gap = ((2048 * 10)*6);
+SET @pg_not_gap = ((2048 * 10)*2);
+select * from t where a = @pg + (@pg_gap/2) + 5 ;
+a	b
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+SELECT * FROM t WHERE b = @pg + (@pg_gap/2) + 5 ORDER BY a DESC
+;
+a	b
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+select * from t where a = @pg + (@pg_gap/2) ;
+a	b
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+SELECT * FROM t WHERE b = @pg + (@pg_gap/2) ORDER BY a DESC ;
+a	b
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+SELECT * FROM t WHERE a between
+@pg + (@pg_gap/2) - 20 and @pg + (@pg_gap/2) + 20 ;
+a	b
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+SELECT * FROM t WHERE a between @pg - 20 and @pg + 20 ;
+a	b
+839660	839660
+839670	839670
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+SELECT * FROM t WHERE a between @pg + @pg_gap - 20 and @pg + @pg_gap + 20
+;
+a	b
+1126410	1126410
+1126420	1126420
+connection default;
+SET session innodb_lock_wait_timeout=1;
+#
+# Check if locks were NOT SET
+#
+insert into t values(5, 5);
+insert into t values((130000 * 10) - 5, (130000 * 10) - 5);
+SET @pg = (2048 * 10);
+# Check for the following cases:
+# 1) match_mode == ROW_SEL_EXACT
+#    && 0 != cmp_dtuple_rec(search_tuple, rec, offsets)
+# 2) match_mode == ROW_SEL_EXACT_PREFIX
+#    && 0 != cmp_dtuple_rec(search_tuple, rec, offsets)
+# 3) match_mode == ROW_SEL_EXACT
+#    && 0 == cmp_dtuple_rec(search_tuple, rec, offsets)
+# 4) match_mode == ROW_SEL_EXACT_PREFIX
+#    && 0 == cmp_dtuple_rec(search_tuple, rec, offsets)
+# 5) inside of gap
+insert into t values(@pg - 15, @pg - 15);
+insert into t values(@pg + @pg_gap + 15, @pg + @pg_gap + 15);
+insert into t values(@pg + 5, @pg + 5);
+insert into t values(@pg + @pg_gap - 5, @pg + @pg_gap - 5);
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+insert into t values(@pg - 15, @pg - 15);
+insert into t values(@pg + @pg_gap + 15, @pg + @pg_gap + 15);
+insert into t values(@pg + 5, @pg + 5);
+insert into t values(@pg + @pg_gap - 5, @pg + @pg_gap - 5);
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+insert into t values(@pg - 15, @pg - 15);
+insert into t values(@pg + @pg_gap + 15, @pg + @pg_gap + 15);
+insert into t values(@pg + 5, @pg + 5);
+insert into t values(@pg + @pg_gap - 5, @pg + @pg_gap - 5);
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+insert into t values(@pg - 15, @pg - 15);
+insert into t values(@pg + @pg_gap + 15, @pg + @pg_gap + 15);
+insert into t values(@pg + 5, @pg + 5);
+insert into t values(@pg + @pg_gap - 5, @pg + @pg_gap - 5);
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+insert into t values(@pg - 15, @pg - 15);
+insert into t values(@pg + @pg_gap + 15, @pg + @pg_gap + 15);
+insert into t values(@pg + 5, @pg + 5);
+insert into t values(@pg + @pg_gap - 5, @pg + @pg_gap - 5);
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+#
+# check for overlap the gap from the left
+#
+insert into t values(@pg - 20 - 15, @pg - 20 - 15);
+insert into t values(@pg + @pg_gap + 15, @pg + @pg_gap + 15);
+insert into t values(@pg - 5, @pg - 5);
+insert into t values(@pg + @pg_gap - 5, @pg + @pg_gap - 5);
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+#
+# check for overlap the gap from the right
+#
+insert into t values(@pg - 15, @pg - 15);
+insert into t values(@pg + @pg_gap + 20 + 15, @pg + @pg_gap + 20 + 15);
+insert into t values(@pg + 5, @pg + 5);
+insert into t values(@pg + @pg_gap + 20 - 5, @pg + @pg_gap + 20 - 5);
+SET @pg = @pg + @pg_gap + @pg_not_gap;
+disconnect prevent_purge;
+disconnect con1;
+connection default;
+rollback;
+drop table t;
+SET GLOBAL innodb_purge_rseg_truncate_frequency = @saved_frequency;
