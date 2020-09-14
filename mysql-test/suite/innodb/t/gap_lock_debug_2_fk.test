@@ -1,0 +1,107 @@
+--source include/have_innodb.inc
+--source include/have_sequence.inc
+--source include/have_debug.inc
+
+SET @saved_frequency = @@GLOBAL.innodb_purge_rseg_truncate_frequency;
+SET GLOBAL innodb_purge_rseg_truncate_frequency = 1;
+
+--let $max_records = 16384
+--let $page_size_in_rows = 4096
+--let $pg_val = ($page_size_in_rows * 10)
+--let $pg_gap = ($pg_val*6)
+--let $pg_not_gap = ($pg_val*2)
+--let $gaps_count = 1
+
+--echo ##########
+--echo # test for isolation level $isolation_level
+--echo ###
+
+--echo #
+--echo # Create parent table
+--echo #
+create table parent(a int unsigned primary key) engine=innodb;
+
+connect (prevent_purge,localhost,root,,);
+start transaction with consistent snapshot;
+
+connection default;
+
+begin;
+--echo #
+--echo # Fill parent table
+--echo #
+--eval insert into parent select seq*10 from seq_1_to_$max_records
+
+--echo #
+--echo # Create child table
+--echo #
+CREATE TABLE child (
+  id INT unsigned NOT NULL PRIMARY KEY,
+  fl0_id INT unsigned,
+  CONSTRAINT `fkl0`
+    FOREIGN KEY (fl0_id) REFERENCES parent (a)
+    ON DELETE CASCADE
+    ON UPDATE RESTRICT
+) ENGINE = InnoDB;
+
+--echo #
+--echo # Insert into child table
+--echo #
+--eval insert into child select seq*10, seq*10 from seq_1_to_$max_records
+
+--eval SET @pg = $pg_val
+--eval SET @pg_gap = $pg_gap
+--eval SET @pg_not_gap = $pg_not_gap
+
+--echo #
+--echo # Insert some row in the parent table to have ability to insert
+--echo # row with the same foreign key in the child table
+--echo #
+insert into parent values(@pg + (@pg_gap/2) + 5);
+insert into parent values(55);
+--eval insert into parent values(($max_records * 10) - 55);
+
+--echo #
+--echo # delete some range from child table
+--echo #
+delete from child where id between @pg and @pg + @pg_gap;
+
+delete from child where id < 100;
+--eval delete from child where id > (($max_records * 10) - 100)
+
+commit;
+
+begin;
+--echo #
+--echo # Delete some row from the parent table to lock gap in the child table
+--echo #
+delete from parent where a = @pg + (@pg_gap/2);
+# delete from t where a between (@pg + (@pg_gap/2) - 10) and (@pg + (@pg_gap/2) + 10);
+
+connect (con1,localhost,root,,);
+set transaction isolation level serializable;
+
+begin;
+#--eval INSERT INTO fl1 VALUES(10, 10)
+#--eval INSERT INTO fl1 VALUES(($max_records * 10) - 10, ($max_records * 10) - 10)
+
+--eval SET @pg = $pg_val
+--eval SET @pg_gap = $pg_gap
+--eval SET @pg_not_gap = $pg_not_gap
+SET session innodb_lock_wait_timeout=1;
+
+--echo #
+--echo # Insert into locked gap
+--echo #
+--error ER_LOCK_WAIT_TIMEOUT
+insert into child values(@pg + (@pg_gap/2) + 5, @pg + (@pg_gap/2) + 5);
+
+disconnect con1;
+disconnect prevent_purge;
+connection default;
+rollback;
+drop table child;
+drop table parent;
+#--dec $isolation_level
+
+SET GLOBAL innodb_purge_rseg_truncate_frequency = @saved_frequency;
