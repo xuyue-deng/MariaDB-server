@@ -7985,3 +7985,5 @@ ER_JSON_TABLE_MULTIPLE_MATCHES
         eng "Can't store multiple matches of the path in the column '%s' of JSON_TABLE '%s'."
 ER_FUNCTION_CANNOT_BE_USED_IN_CLAUSE
         eng "Function '%s' cannot be used in the %s clause"
+ER_ORACLE_COMPAT_FUNCTION_ERROR
+        eng "Oracle compatibility function error: %s"
