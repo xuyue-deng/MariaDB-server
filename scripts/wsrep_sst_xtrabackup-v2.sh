@@ -18,10 +18,8 @@
 # Documentation: http://www.percona.com/doc/percona-xtradb-cluster/manual/xtrabackup_sst.html 
 # Make sure to read that before proceeding!
 
-
-
-
 . $(dirname $0)/wsrep_sst_common
+wsrep_check_datadir
 
 ealgo=""
 ekey=""
@@ -249,7 +247,7 @@ verify_file_exists()
 
 get_transfer()
 {
-    TSST_PORT=${WSREP_SST_OPT_PORT:-4444}
+    TSST_PORT=$WSREP_SST_OPT_PORT
 
     if [[ $tfmt == 'nc' ]];then
         if [[ ! -x `which nc` ]];then 
@@ -267,26 +265,46 @@ get_transfer()
 
         wsrep_log_info "Using netcat as streamer"
         if [[ "$WSREP_SST_OPT_ROLE"  == "joiner" ]];then
-            if nc -h 2>&1 | grep -q ncat; then
-                # Ncat
-                tcmd="nc $sockopt -l ${TSST_PORT}"
-            elif nc -h 2>&1 | grep -q -- '-d\>';then
-                # Debian netcat
-                tcmd="nc $sockopt -dl ${TSST_PORT}"
-            else
-                # traditional netcat
-                tcmd="nc $sockopt -l -p ${TSST_PORT}"
-            fi
-        else
             if nc -h 2>&1 | grep -q ncat;then
                 # Ncat
-                tcmd="nc ${WSREP_SST_OPT_HOST_UNESCAPED} ${TSST_PORT}"
-            elif nc -h 2>&1 | grep -q -- '-d\>';then
+                tcmd="nc -l ${TSST_PORT}"
+            elif nc -h 2>&1 | grep -qw -- '-d\>';then
                 # Debian netcat
-                tcmd="nc ${WSREP_SST_OPT_HOST_UNESCAPED} ${TSST_PORT}"
+                if [ $WSREP_SST_OPT_HOST_IPv6 -eq 1 ];then
+                    # When host is not explicitly specified (when only the port
+                    # is specified) netcat can only bind to an IPv4 address if
+                    # the "-6" option is not explicitly specified:
+                    tcmd="nc -dl -6 ${TSST_PORT}"
+                else
+                    tcmd="nc -dl ${TSST_PORT}"
+                fi
             else
                 # traditional netcat
-                tcmd="nc -q0 ${WSREP_SST_OPT_HOST_UNESCAPED} ${TSST_PORT}"
+                tcmd="nc -l -p ${TSST_PORT}"
+            fi
+        else
+            # Check to see if netcat supports the '-N' flag.
+            # -N Shutdown the network socket after EOF on stdin
+            # If it supports the '-N' flag, then we need to use the '-N'
+            # flag, otherwise the transfer will stay open after the file
+            # transfer and cause the command to timeout.
+            # Older versions of netcat did not need this flag and will
+            # return an error if the flag is used.
+            #
+            tcmd_extra=""
+            if nc -h 2>&1 | grep -qw -- -N;then
+                tcmd_extra+="-N"
+            fi
+            # netcat doesn't understand [] around IPv6 address
+            if nc -h 2>&1 | grep -q ncat;then
+                # Ncat
+                tcmd="nc ${tcmd_extra} ${WSREP_SST_OPT_HOST_UNESCAPED} ${TSST_PORT}"
+            elif nc -h 2>&1 | grep -qw -- '-d\>';then
+                # Debian netcat
+                tcmd="nc ${tcmd_extra} ${WSREP_SST_OPT_HOST_UNESCAPED} ${TSST_PORT}"
+            else
+                # traditional netcat
+                tcmd="nc -q0 ${tcmd_extra} ${WSREP_SST_OPT_HOST_UNESCAPED} ${TSST_PORT}"
             fi
         fi
     else
@@ -863,7 +881,7 @@ if [[ ${FORCE_FTWRL:-0} -eq 1 ]];then
 fi
 
 
-INNOEXTRA=""
+INNOEXTRA=
 
 if [[ $ssyslog -eq 1 ]];then 
 
@@ -901,7 +919,7 @@ get_transfer
 
 INNODB_DATA_HOME_DIR=${INNODB_DATA_HOME_DIR:-""}
 # Try to set INNODB_DATA_HOME_DIR from the command line:
-if [ ! -z "$INNODB_DATA_HOME_DIR_ARG" ]; then
+if [ -n "$INNODB_DATA_HOME_DIR_ARG" ]; then
     INNODB_DATA_HOME_DIR=$INNODB_DATA_HOME_DIR_ARG
 fi
 # if no command line arg and INNODB_DATA_HOME_DIR environment variable
@@ -912,8 +930,8 @@ fi
 if [ -z "$INNODB_DATA_HOME_DIR" ]; then
     INNODB_DATA_HOME_DIR=$(parse_cnf --mysqld innodb-data-home-dir '')
 fi
-if [ ! -z "$INNODB_DATA_HOME_DIR" ]; then
-   INNOEXTRA+=" --innodb-data-home-dir=$INNODB_DATA_HOME_DIR"
+if [ -n "$INNODB_DATA_HOME_DIR" ]; then
+    INNOEXTRA+=" --innodb-data-home-dir=$INNODB_DATA_HOME_DIR"
 fi
 
 if [ -n "$INNODB_DATA_HOME_DIR" ]; then
@@ -925,7 +943,7 @@ else
 fi
 
 INNOAPPLY="${INNOBACKUPEX_BIN} $disver $iapts \$INNOEXTRA --apply-log \$rebuildcmd \${DATA} ${INNOAPPLY}"
-INNOMOVE="${INNOBACKUPEX_BIN} ${WSREP_SST_OPT_CONF} $disver $impts  --move-back --force-non-empty-directories \${DATA} ${INNOMOVE}"
+INNOMOVE="${INNOBACKUPEX_BIN} ${WSREP_SST_OPT_CONF} $disver $impts --move-back --force-non-empty-directories \${DATA} ${INNOMOVE}"
 INNOBACKUP="${INNOBACKUPEX_BIN} ${WSREP_SST_OPT_CONF} $disver $iopts \$tmpopts \$INNOEXTRA --galera-info --stream=\$sfmt \$itmpdir ${INNOBACKUP}"
 
 if [ "$WSREP_SST_OPT_ROLE" = "donor" ]
@@ -1000,7 +1018,7 @@ then
         wsrep_log_info "Sleeping before data transfer for SST"
         sleep 10
 
-        wsrep_log_info "Streaming the backup to joiner at ${WSREP_SST_OPT_HOST} ${WSREP_SST_OPT_PORT:-4444}"
+        wsrep_log_info "Streaming the backup to joiner at ${WSREP_SST_OPT_HOST}:${WSREP_SST_OPT_PORT}"
 
         # Add compression to the head of the stream (if specified)
         if [[ -n $scomp ]]; then
@@ -1064,17 +1082,25 @@ then
 
     ib_home_dir=$INNODB_DATA_HOME_DIR
 
-    # Try to set ib_log_dir from the command line:
-    ib_log_dir=$INNODB_LOG_GROUP_HOME_ARG
-    if [ -z "$ib_log_dir" ]; then
-        ib_log_dir=$(parse_cnf mysqld$WSREP_SST_OPT_SUFFIX_VALUE innodb-log-group-home-dir "")
+    WSREP_LOG_DIR=${WSREP_LOG_DIR:-""}
+    # Try to set WSREP_LOG_DIR from the command line:
+    if [ -n "$INNODB_LOG_GROUP_HOME_ARG" ]; then
+        WSREP_LOG_DIR=$INNODB_LOG_GROUP_HOME_ARG
     fi
-    if [ -z "$ib_log_dir" ]; then
-        ib_log_dir=$(parse_cnf --mysqld innodb-log-group-home-dir "")
+    # if no command line arg and WSREP_LOG_DIR is not set,
+    # try to get it from my.cnf:
+    if [ -z "$WSREP_LOG_DIR" ]; then
+        WSREP_LOG_DIR=$(parse_cnf mysqld$WSREP_SST_OPT_SUFFIX_VALUE innodb-log-group-home-dir '')
     fi
+    if [ -z "$WSREP_LOG_DIR" ]; then
+        WSREP_LOG_DIR=$(parse_cnf --mysqld innodb-log-group-home-dir '')
+    fi
+
+    ib_log_dir=$WSREP_LOG_DIR
 
     # Try to set ib_undo_dir from the command line:
     ib_undo_dir=$INNODB_UNDO_DIR_ARG
+    # if no command line arg then try to get it from my.cnf:
     if [ -z "$ib_undo_dir" ]; then
         ib_undo_dir=$(parse_cnf mysqld$WSREP_SST_OPT_SUFFIX_VALUE innodb-undo-directory "")
     fi
@@ -1094,7 +1120,7 @@ then
     # May need xtrabackup_checkpoints later on
     rm -f ${DATA}/xtrabackup_binary ${DATA}/xtrabackup_galera_info  ${DATA}/xtrabackup_logfile
 
-    wait_for_listen ${WSREP_SST_OPT_HOST} ${WSREP_SST_OPT_PORT:-4444} ${MODULE} &
+    wait_for_listen ${WSREP_SST_OPT_HOST} ${WSREP_SST_OPT_PORT} ${MODULE} &
 
     trap sig_joiner_cleanup HUP PIPE INT TERM
     trap cleanup_joiner EXIT
@@ -1146,17 +1172,17 @@ then
             find $ib_home_dir $ib_log_dir $ib_undo_dir $DATA -mindepth 1 -prune -regex $cpat -o -exec rm -rfv {} 1>&2 \+
         fi
 
-        tempdir=$LOG_BIN_ARG
+        tempdir=$WSREP_SST_OPT_BINLOG
         if [ -z "$tempdir" ]; then
             tempdir=$(parse_cnf mysqld$WSREP_SST_OPT_SUFFIX_VALUE log-bin "")
         fi
         if [ -z "$tempdir" ]; then
             tempdir=$(parse_cnf --mysqld log-bin "")
         fi
-        if [[ -n ${tempdir:-} ]];then
+        if [ -n "$tempdir" ]; then
             binlog_dir=$(dirname $tempdir)
             binlog_file=$(basename $tempdir)
-            if [[ -n ${binlog_dir:-} && $binlog_dir != '.' && $binlog_dir != $DATA ]];then
+            if [[ -n "${binlog_dir:-}" && "$binlog_dir" != '.' && "$binlog_dir" != "$DATA" ]]; then
                 pattern="$binlog_dir/$binlog_file\.[0-9]+$"
                 wsrep_log_info "Cleaning the binlog directory $binlog_dir as well"
                 find $binlog_dir -maxdepth 1 -type f -regex $pattern -exec rm -fv {} 1>&2 \+ || true
@@ -1164,11 +1190,8 @@ then
             fi
         fi
 
-
-
         TDATA=${DATA}
         DATA="${DATA}/.sst"
-
 
         MAGIC_FILE="${DATA}/${INFO_FILE}"
         wsrep_log_info "Waiting for SST streaming to complete!"
@@ -1236,7 +1259,7 @@ then
         fi
 
 
-        if  [[ ! -z $WSREP_SST_OPT_BINLOG ]];then
+        if  [ -n "$WSREP_SST_OPT_BINLOG" ]; then
 
             BINLOG_DIRNAME=$(dirname $WSREP_SST_OPT_BINLOG)
             BINLOG_FILENAME=$(basename $WSREP_SST_OPT_BINLOG)

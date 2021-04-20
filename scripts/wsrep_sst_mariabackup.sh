@@ -21,6 +21,7 @@
 # Make sure to read that before proceeding!
 
 . $(dirname $0)/wsrep_sst_common
+wsrep_check_datadir
 
 OS=$(uname)
 ealgo=""
@@ -56,8 +57,6 @@ sfmt="tar"
 strmcmd=""
 tfmt=""
 tcmd=""
-rebuild=0
-rebuildcmd=""
 payload=0
 pvformat="-F '%N => Rate:%r Avg:%a Elapsed:%t %e Bytes: %b %p' "
 pvopts="-f -i 10 -N $WSREP_SST_OPT_ROLE "
@@ -84,8 +83,8 @@ pcmd="pv $pvopts"
 declare -a RC
 
 set +e
-INNOBACKUPEX_BIN=$(which mariabackup)
-if test -z $INNOBACKUPEX_BIN
+MARIABACKUP_BIN="$(command -v mariabackup)"
+if test -z $MARIABACKUP_BIN
 then
   wsrep_log_error 'mariabackup binary not found in $PATH'
   exit 42
@@ -136,7 +135,7 @@ get_keys()
     fi
 
     if [[ $encrypt -eq 0 ]];then
-        if $MY_PRINT_DEFAULTS xtrabackup | grep -q encrypt;then
+        if $MY_PRINT_DEFAULTS xtrabackup | grep -q -- "--encrypt";then
             wsrep_log_error "Unexpected option combination. SST may fail. Refer to http://www.percona.com/doc/percona-xtradb-cluster/manual/xtrabackup_sst.html"
         fi
         return
@@ -175,17 +174,13 @@ get_keys()
 
 get_transfer()
 {
-    if [[ -z $SST_PORT ]];then
-        TSST_PORT=4444
-    else
-        TSST_PORT=$SST_PORT
-    fi
+    TSST_PORT=$SST_PORT
 
     if [[ $tfmt == 'nc' ]];then
         wsrep_check_programs nc
         wsrep_log_info "Using netcat as streamer"
 
-        if [[ "$WSREP_SST_OPT_ROLE"  == "joiner" ]];then
+        if [[ "$WSREP_SST_OPT_ROLE" == "joiner" ]];then
             if nc -h 2>&1 | grep -q ncat;then
                 # Ncat
                 tcmd="nc -l ${TSST_PORT}"
@@ -213,7 +208,7 @@ get_transfer()
             # return an error if the flag is used.
             #
             tcmd_extra=""
-            if nc -h 2>&1 | grep -qw -- -N; then
+            if nc -h 2>&1 | grep -qw -- -N;then
                 tcmd_extra+="-N"
                 wsrep_log_info "Using nc -N"
             fi
@@ -249,7 +244,7 @@ get_transfer()
                 exit 22
             fi
             stagemsg+="-OpenSSL-Encrypted-2"
-            if [[ "$WSREP_SST_OPT_ROLE"  == "joiner" ]];then
+            if [[ "$WSREP_SST_OPT_ROLE" == "joiner" ]];then
                 wsrep_log_info "Decrypting with cert=${tpem}, cafile=${tcert}"
                 tcmd="socat -u openssl-listen:${TSST_PORT},reuseaddr,cert=${tpem},cafile=${tcert}${sockopt} stdio"
             else
@@ -263,7 +258,7 @@ get_transfer()
                 exit 22
             fi
             stagemsg+="-OpenSSL-Encrypted-3"
-            if [[ "$WSREP_SST_OPT_ROLE"  == "joiner" ]];then
+            if [[ "$WSREP_SST_OPT_ROLE" == "joiner" ]];then
                 if [[ -z $tcert ]];then
                     wsrep_log_info "Decrypting with cert=${tpem}, key=${tkey}, verify=0"
                     tcmd="socat -u openssl-listen:${TSST_PORT},reuseaddr,cert=${tpem},key=${tkey},verify=0${sockopt} stdio"
@@ -281,28 +276,13 @@ get_transfer()
                 fi
             fi
         else
-            if [[ "$WSREP_SST_OPT_ROLE"  == "joiner" ]];then
+            if [[ "$WSREP_SST_OPT_ROLE" == "joiner" ]];then
                 tcmd="socat -u TCP-LISTEN:${TSST_PORT},reuseaddr${sockopt} stdio"
             else
                 tcmd="socat -u stdio TCP:${REMOTEIP}:${TSST_PORT}${sockopt}"
             fi
         fi
     fi
-}
-
-parse_cnf()
-{
-    local group=$1
-    local var=$2
-    # print the default settings for given group using my_print_default.
-    # normalize the variable names specified in cnf file (user can use _ or - for example log-bin or log_bin)
-    # then grep for needed variable
-    # finally get the variable value (if variables has been specified multiple time use the last value only)
-    reval=$($MY_PRINT_DEFAULTS $group | awk -F= '{if ($1 ~ /_/) { gsub(/_/,"-",$1); print $1"="$2 } else { print $0 }}' | grep -- "--$var=" | cut -d= -f2- | tail -1)
-    if [[ -z $reval ]];then
-        [[ -n $3 ]] && reval=$3
-    fi
-    echo $reval
 }
 
 get_footprint()
@@ -341,7 +321,7 @@ adjust_progress()
             pcmd="pv -q"
     fi
 
-    if [[ -n $rlimit && "$WSREP_SST_OPT_ROLE"  == "donor" ]];then
+    if [[ -n $rlimit && "$WSREP_SST_OPT_ROLE" == "donor" ]];then
         wsrep_log_info "Rate-limiting SST to $rlimit"
         pcmd+=" -L \$rlimit"
     fi
@@ -351,28 +331,34 @@ read_cnf()
 {
     sfmt=$(parse_cnf sst streamfmt "xbstream")
     tfmt=$(parse_cnf sst transferfmt "socat")
-    tcert=$(parse_cnf sst tca "")
-    tpem=$(parse_cnf sst tcert "")
-    tkey=$(parse_cnf sst tkey "")
+
     encrypt=$(parse_cnf sst encrypt 0)
+    if [ $encrypt -ge 2 ]; then
+        tcert=$(parse_cnf sst tca "")
+        tpem=$(parse_cnf sst tcert "")
+        if [ $encrypt -ge 3 ]; then
+            tkey=$(parse_cnf sst tkey "")
+        fi
+    elif [ $encrypt -ne -1 ]; then
+        # Refer to http://www.percona.com/doc/percona-xtradb-cluster/manual/xtrabackup_sst.html
+        ealgo=$(parse_cnf xtrabackup encrypt "")
+        if [ -z "$ealgo" ]; then
+            ealgo=$(parse_cnf sst encrypt-algo "")
+            ekey=$(parse_cnf sst encrypt-key "")
+            ekeyfile=$(parse_cnf sst encrypt-key-file "")
+        else
+            ekey=$(parse_cnf xtrabackup encrypt-key "")
+            ekeyfile=$(parse_cnf xtrabackup encrypt-key-file "")
+        fi
+    fi
+
     sockopt=$(parse_cnf sst sockopt "")
     progress=$(parse_cnf sst progress "")
-    rebuild=$(parse_cnf sst rebuild 0)
     ttime=$(parse_cnf sst time 0)
     cpat=$(parse_cnf sst cpat '.*galera\.cache$\|.*sst_in_progress$\|.*\.sst$\|.*gvwstate\.dat$\|.*grastate\.dat$\|.*\.err$\|.*\.log$\|.*RPM_UPGRADE_MARKER$\|.*RPM_UPGRADE_HISTORY$')
     [[ $OS == "FreeBSD" ]] && cpat=$(parse_cnf sst cpat '.*galera\.cache$|.*sst_in_progress$|.*\.sst$|.*gvwstate\.dat$|.*grastate\.dat$|.*\.err$|.*\.log$|.*RPM_UPGRADE_MARKER$|.*RPM_UPGRADE_HISTORY$')
-    ealgo=$(parse_cnf xtrabackup encrypt "")
-    ekey=$(parse_cnf xtrabackup encrypt-key "")
-    ekeyfile=$(parse_cnf xtrabackup encrypt-key-file "")
     scomp=$(parse_cnf sst compressor "")
     sdecomp=$(parse_cnf sst decompressor "")
-
-    # Refer to http://www.percona.com/doc/percona-xtradb-cluster/manual/xtrabackup_sst.html
-    if [[ -z $ealgo ]];then
-        ealgo=$(parse_cnf sst encrypt-algo "")
-        ekey=$(parse_cnf sst encrypt-key "")
-        ekeyfile=$(parse_cnf sst encrypt-key-file "")
-    fi
 
     rlimit=$(parse_cnf sst rlimit "")
     uextra=$(parse_cnf sst use-extra 0)
@@ -393,7 +379,7 @@ read_cnf()
     fi
 
     if [[ $ssyslog -ne -1 ]];then
-        if $MY_PRINT_DEFAULTS mysqld_safe | tr '_' '-' | grep -q -- "--syslog";then
+        if $MY_PRINT_DEFAULTS mysqld_safe | grep -q -- "--syslog";then
             ssyslog=1
         fi
     fi
@@ -409,7 +395,7 @@ get_stream()
 {
     if [[ $sfmt == 'mbstream' || $sfmt == 'xbstream' ]];then
         wsrep_log_info "Streaming with ${sfmt}"
-        if [[ "$WSREP_SST_OPT_ROLE"  == "joiner" ]];then
+        if [[ "$WSREP_SST_OPT_ROLE" == "joiner" ]];then
             strmcmd="${XBSTREAM_BIN} -x"
         else
             strmcmd="${XBSTREAM_BIN} -c \${INFO_FILE}"
@@ -417,7 +403,7 @@ get_stream()
     else
         sfmt="tar"
         wsrep_log_info "Streaming with tar"
-        if [[ "$WSREP_SST_OPT_ROLE"  == "joiner" ]];then
+        if [[ "$WSREP_SST_OPT_ROLE" == "joiner" ]];then
             strmcmd="tar xfi - "
         else
             strmcmd="tar cf - \${INFO_FILE} "
@@ -539,8 +525,8 @@ kill_xtrabackup()
 
 setup_ports()
 {
-    SST_PORT=${WSREP_SST_OPT_ADDR_PORT}
-    if [[ "$WSREP_SST_OPT_ROLE"  == "donor" ]];then
+    SST_PORT=$WSREP_SST_OPT_PORT
+    if [[ "$WSREP_SST_OPT_ROLE" == "donor" ]];then
         REMOTEIP=${WSREP_SST_OPT_HOST}
         lsn=${WSREP_SST_OPT_LSN}
         sst_ver=${WSREP_SST_OPT_SST_VER}
@@ -570,8 +556,9 @@ check_extra()
 {
     local use_socket=1
     if [[ $uextra -eq 1 ]];then
-        if $MY_PRINT_DEFAULTS --mysqld | tr '_' '-' | grep -- "--thread-handling=" | grep -q 'pool-of-threads';then
-            local eport=$($MY_PRINT_DEFAULTS --mysqld | tr '_' '-' | grep -- "--extra-port=" | cut -d= -f2)
+        local thread_handling=$(parse_cnf --mysqld thread-handling "")
+        if [ $thread_handling -eq "pool-of-threads" ];then
+            local eport=$(parse_cnf --mysqld extra-port "")
             if [[ -n $eport ]];then
                 # Xtrabackup works only locally.
                 # Hence, setting host to 127.0.0.1 unconditionally.
@@ -680,7 +667,7 @@ monitor_process()
     done
 }
 
-wsrep_check_programs "$INNOBACKUPEX_BIN"
+wsrep_check_programs "$MARIABACKUP_BIN"
 
 rm -f "${MAGIC_FILE}"
 
@@ -692,7 +679,7 @@ fi
 read_cnf
 setup_ports
 
-if ${INNOBACKUPEX_BIN} /tmp --help 2>/dev/null | grep -q -- '--version-check'; then
+if ${MARIABACKUP_BIN} --help 2>/dev/null | grep -q -- '--version-check'; then
     disver="--no-version-check"
 fi
 
@@ -703,11 +690,11 @@ if [[ ${FORCE_FTWRL:-0} -eq 1 ]];then
     iopts+=" --no-backup-locks"
 fi
 
-INNOEXTRA=$WSREP_SST_OPT_MYSQLD
+INNOEXTRA=
 
 INNODB_DATA_HOME_DIR=${INNODB_DATA_HOME_DIR:-""}
 # Try to set INNODB_DATA_HOME_DIR from the command line:
-if [ ! -z "$INNODB_DATA_HOME_DIR_ARG" ]; then
+if [ -n "$INNODB_DATA_HOME_DIR_ARG" ]; then
     INNODB_DATA_HOME_DIR=$INNODB_DATA_HOME_DIR_ARG
 fi
 # if no command line arg and INNODB_DATA_HOME_DIR environment variable
@@ -718,8 +705,8 @@ fi
 if [ -z "$INNODB_DATA_HOME_DIR" ]; then
     INNODB_DATA_HOME_DIR=$(parse_cnf --mysqld innodb-data-home-dir '')
 fi
-if [ ! -z "$INNODB_DATA_HOME_DIR" ]; then
-   INNOEXTRA+=" --innodb-data-home-dir=$INNODB_DATA_HOME_DIR"
+if [ -n "$INNODB_DATA_HOME_DIR" ]; then
+    INNOEXTRA+=" --innodb-data-home-dir=$INNODB_DATA_HOME_DIR"
 fi
 
 if [ -n "$INNODB_DATA_HOME_DIR" ]; then
@@ -735,7 +722,7 @@ if [[ $ssyslog -eq 1 ]];then
     if ! command -v logger >/dev/null;then
         wsrep_log_error "logger not in path: $PATH. Ignoring"
     else
-        wsrep_log_info "Logging all stderr of SST/Innobackupex to syslog"
+        wsrep_log_info "Logging all stderr of SST/mariabackup to syslog"
 
         exec 2> >(logger -p daemon.err -t ${ssystag}wsrep-sst-$WSREP_SST_OPT_ROLE)
 
@@ -748,11 +735,11 @@ if [[ $ssyslog -eq 1 ]];then
         {
             logger  -p daemon.info -t ${ssystag}wsrep-sst-$WSREP_SST_OPT_ROLE "$@"
         }
-
-        INNOAPPLY="${INNOBACKUPEX_BIN} --prepare $disver $iapts \$INNOEXTRA $rebuildcmd --target-dir=\${DATA} 2>&1 | logger -p daemon.err -t ${ssystag}innobackupex-apply"
-        INNOMOVE="${INNOBACKUPEX_BIN} ${WSREP_SST_OPT_CONF} --move-back $disver $impts --force-non-empty-directories --target-dir=\${DATA} 2>&1 | logger -p daemon.err -t ${ssystag}innobackupex-move"
-        INNOBACKUP="${INNOBACKUPEX_BIN} ${WSREP_SST_OPT_CONF} --backup $disver $iopts \$tmpopts \$INNOEXTRA --galera-info --stream=\$sfmt --target-dir=\$itmpdir 2> >(logger -p daemon.err -t ${ssystag}innobackupex-backup)"
     fi
+
+    INNOAPPLY="2>&1 | logger -p daemon.err -t ${ssystag}innobackupex-apply"
+    INNOMOVE="2>&1 | logger -p daemon.err -t ${ssystag}innobackupex-move"
+    INNOBACKUP="2> >(logger -p daemon.err -t ${ssystag}innobackupex-backup)"
 
 else
 
@@ -790,7 +777,6 @@ then
         else
             newfile=${INNOMOVELOG}.${ARCHIVETIMESTAMP}
         fi
-
         wsrep_log_info "Moving ${INNOMOVELOG} to ${newfile}"
         mv "${INNOMOVELOG}" "${newfile}"
         gzip "${newfile}"
@@ -804,18 +790,21 @@ then
         else
             newfile=${INNOBACKUPLOG}.${ARCHIVETIMESTAMP}
         fi
-
         wsrep_log_info "Moving ${INNOBACKUPLOG} to ${newfile}"
         mv "${INNOBACKUPLOG}" "${newfile}"
         gzip "${newfile}"
     fi
 fi
 
-    INNOAPPLY="${INNOBACKUPEX_BIN} --prepare $disver $iapts \$INNOEXTRA $rebuildcmd --target-dir=\${DATA} &> ${INNOAPPLYLOG}"
-    INNOMOVE="${INNOBACKUPEX_BIN} ${WSREP_SST_OPT_CONF} --move-back $disver $impts --force-non-empty-directories --target-dir=\${DATA} &> ${INNOMOVELOG}"
-    INNOBACKUP="${INNOBACKUPEX_BIN} ${WSREP_SST_OPT_CONF} --backup $disver $iopts \$tmpopts \$INNOEXTRA --galera-info --stream=\$sfmt --target-dir=\$itmpdir 2> ${INNOBACKUPLOG}"
+    INNOAPPLY="&> ${INNOAPPLYLOG}"
+    INNOMOVE="&> ${INNOMOVELOG}"
+    INNOBACKUP="2> ${INNOBACKUPLOG}"
 
 fi
+
+INNOAPPLY="${MARIABACKUP_BIN} --prepare $disver $iapts \$INNOEXTRA --target-dir=\${DATA} --datadir=\${DATA} --mysqld-args \$WSREP_SST_OPT_MYSQLD $INNOAPPLY"
+INNOMOVE="${MARIABACKUP_BIN} ${WSREP_SST_OPT_CONF} --move-back $disver $impts --force-non-empty-directories --target-dir=\${DATA} --datadir=\${TDATA} $INNOMOVE"
+INNOBACKUP="${MARIABACKUP_BIN} ${WSREP_SST_OPT_CONF} --backup $disver $iopts \$tmpopts \$INNOEXTRA --galera-info --stream=\$sfmt --target-dir=\$itmpdir --datadir=\${DATA} --mysqld-args \$WSREP_SST_OPT_MYSQLD $INNOBACKUP"
 
 get_stream
 get_transfer
@@ -842,7 +831,7 @@ then
         fi
 
         itmpdir=$(mktemp -d)
-        wsrep_log_info "Using $itmpdir as innobackupex temporary directory"
+        wsrep_log_info "Using $itmpdir as mariabackup temporary directory"
 
         if [[ -n "${WSREP_SST_OPT_USER:-}" && "$WSREP_SST_OPT_USER" != "(null)" ]]; then
            INNOEXTRA+=" --user=$WSREP_SST_OPT_USER"
@@ -856,15 +845,6 @@ then
             unset MYSQL_PWD
         fi
 
-        get_keys
-        if [[ $encrypt -eq 1 ]];then
-            if [[ -n $ekey ]];then
-                INNOEXTRA+=" --encrypt=$ealgo --encrypt-key=$ekey"
-            else
-                INNOEXTRA+=" --encrypt=$ealgo --encrypt-key-file=$ekeyfile"
-            fi
-        fi
-
         check_extra
 
         wsrep_log_info "Streaming GTID file before SST"
@@ -875,19 +855,19 @@ then
 
         ttcmd="$tcmd"
 
+        if [[ -n $scomp ]];then
+            tcmd="$scomp | $tcmd"
+        fi
+
+        get_keys
         if [[ $encrypt -eq 1 ]];then
-            if [[ -n $scomp ]];then
-                tcmd=" $ecmd | $scomp | $tcmd "
-            else
-                tcmd=" $ecmd | $tcmd "
-            fi
-        elif [[ -n $scomp ]];then
-            tcmd=" $scomp | $tcmd "
+            tcmd="$ecmd | $tcmd"
         fi
 
         send_donor $DATA "${stagemsg}-gtid"
 
         tcmd="$ttcmd"
+
         if [[ -n $progress ]];then
             get_footprint
             tcmd="$pcmd | $tcmd"
@@ -899,7 +879,7 @@ then
         wsrep_log_info "Sleeping before data transfer for SST"
         sleep 10
 
-        wsrep_log_info "Streaming the backup to joiner at ${REMOTEIP} ${SST_PORT:-4444}"
+        wsrep_log_info "Streaming the backup to joiner at ${REMOTEIP}:${SST_PORT}"
 
         if [[ -n $scomp ]];then
             tcmd="$scomp | $tcmd"
@@ -910,7 +890,7 @@ then
         set -e
 
         if [ ${RC[0]} -ne 0 ]; then
-          wsrep_log_error "${INNOBACKUPEX_BIN} finished with error: ${RC[0]}. " \
+          wsrep_log_error "${MARIABACKUP_BIN} finished with error: ${RC[0]}. " \
                           "Check syslog or ${INNOBACKUPLOG} for details"
           exit 22
         elif [[ ${RC[$(( ${#RC[@]}-1 ))]} -eq 1 ]];then
@@ -918,7 +898,7 @@ then
           exit 22
         fi
 
-        # innobackupex implicitly writes PID to fixed location in $xtmpdir
+        # mariabackup implicitly writes PID to fixed location in $xtmpdir
         XTRABACKUP_PID="$xtmpdir/xtrabackup_pid"
 
     else # BYPASS FOR IST
@@ -930,16 +910,16 @@ then
         # (separated by a space).
         echo "${WSREP_SST_OPT_GTID} ${WSREP_SST_OPT_GTID_DOMAIN_ID}" > "${MAGIC_FILE}"
         echo "1" > "${DATA}/${IST_FILE}"
+
+        if [[ -n $scomp ]];then
+            tcmd="$scomp | $tcmd"
+        fi
+
         get_keys
         if [[ $encrypt -eq 1 ]];then
-            if [[ -n $scomp ]];then
-                tcmd=" $ecmd | $scomp | $tcmd "
-            else
-                tcmd=" $ecmd | $tcmd "
-            fi
-        elif [[ -n $scomp ]];then
-            tcmd=" $scomp | $tcmd "
+            tcmd="$ecmd | $tcmd"
         fi
+
         strmcmd+=" \${IST_FILE}"
 
         send_donor $DATA "${stagemsg}-IST"
@@ -958,7 +938,7 @@ then
 
     WSREP_LOG_DIR=${WSREP_LOG_DIR:-""}
     # Try to set WSREP_LOG_DIR from the command line:
-    if [ ! -z "$INNODB_LOG_GROUP_HOME_ARG" ]; then
+    if [ -n "$INNODB_LOG_GROUP_HOME_ARG" ]; then
         WSREP_LOG_DIR=$INNODB_LOG_GROUP_HOME_ARG
     fi
     # if no command line arg and WSREP_LOG_DIR is not set,
@@ -973,7 +953,7 @@ then
     ib_log_dir=$WSREP_LOG_DIR
 
     # Try to set ib_undo_dir from the command line:
-    ib_undo_dir=${INNODB_UNDO_DIR_ARG:-""}
+    ib_undo_dir=$INNODB_UNDO_DIR_ARG
     # if no command line arg then try to get it from my.cnf:
     if [ -z "$ib_undo_dir" ]; then
         ib_undo_dir=$(parse_cnf mysqld$WSREP_SST_OPT_SUFFIX_VALUE innodb-undo-directory "")
@@ -992,18 +972,9 @@ then
     rm -f "${DATA}/${IST_FILE}"
 
     # May need xtrabackup_checkpoints later on
-    rm -f ${DATA}/xtrabackup_binary ${DATA}/xtrabackup_galera_info  ${DATA}/ib_logfile0
+    rm -f ${DATA}/xtrabackup_binary ${DATA}/xtrabackup_galera_info ${DATA}/ib_logfile0
 
-    ADDR=${WSREP_SST_OPT_ADDR}
-    if [ -z "${SST_PORT}" ]
-    then
-        SST_PORT=4444
-        if [ "${ADDR#\[}" != "$ADDR" ]; then
-            ADDR="$(echo ${WSREP_SST_OPT_ADDR} | awk -F '\\]:' '{ print $1 }')]:${SST_PORT}"
-        else
-            ADDR="$(echo ${WSREP_SST_OPT_ADDR} | awk -F ':' '{ print $1 }'):${SST_PORT}"
-        fi
-    fi
+    ADDR=$WSREP_SST_OPT_ADDR
 
     wait_for_listen ${SST_PORT} ${ADDR} ${MODULE} &
 
@@ -1055,17 +1026,17 @@ then
             find $ib_home_dir $ib_log_dir $ib_undo_dir $DATA -mindepth 1 -prune -regex $cpat -o -exec rm -rfv {} 1>&2 \+
         fi
 
-        tempdir=$LOG_BIN_ARG
+        tempdir=$WSREP_SST_OPT_BINLOG
         if [ -z "$tempdir" ]; then
             tempdir=$(parse_cnf mysqld$WSREP_SST_OPT_SUFFIX_VALUE log-bin "")
         fi
         if [ -z "$tempdir" ]; then
             tempdir=$(parse_cnf --mysqld log-bin "")
         fi
-        if [[ -n ${tempdir:-} ]];then
+        if [ -n "$tempdir" ]; then
             binlog_dir=$(dirname $tempdir)
             binlog_file=$(basename $tempdir)
-            if [[ -n ${binlog_dir:-} && $binlog_dir != '.' && $binlog_dir != $DATA ]];then
+            if [[ -n "${binlog_dir:-}" && "$binlog_dir" != '.' && "$binlog_dir" != "$DATA" ]]; then
                 pattern="$binlog_dir/$binlog_file\.[0-9]+$"
                 wsrep_log_info "Cleaning the binlog directory $binlog_dir as well"
                 find $binlog_dir -maxdepth 1 -type f -regex $pattern -exec rm -fv {} 1>&2 \+ || true
@@ -1083,20 +1054,15 @@ then
         get_proc
 
         if [[ ! -s ${DATA}/xtrabackup_checkpoints ]];then
-            wsrep_log_error "xtrabackup_checkpoints missing, failed innobackupex/SST on donor"
+            wsrep_log_error "xtrabackup_checkpoints missing, failed mariabackup/SST on donor"
             exit 2
         fi
 
-        # Rebuild indexes for compact backups
+        # Compact backups are not supported by mariabackup
         if grep -q 'compact = 1' ${DATA}/xtrabackup_checkpoints;then
             wsrep_log_info "Index compaction detected"
-            rebuild=1
-        fi
-
-        if [[ $rebuild -eq 1 ]];then
-            nthreads=$(parse_cnf xtrabackup rebuild-threads $nproc)
-            wsrep_log_info "Rebuilding during prepare with $nthreads threads"
-            rebuildcmd="--rebuild-indexes --rebuild-threads=$nthreads"
+            wsrel_log_error "Compact backups are not supported by mariabackup"
+            exit 2
         fi
 
         if test -n "$(find ${DATA} -maxdepth 1 -type f -name '*.qp' -print -quit)";then
@@ -1140,7 +1106,7 @@ then
             fi
         fi
 
-        if  [[ ! -z $WSREP_SST_OPT_BINLOG ]];then
+        if  [ -n "$WSREP_SST_OPT_BINLOG" ]; then
 
             BINLOG_DIRNAME=$(dirname $WSREP_SST_OPT_BINLOG)
             BINLOG_FILENAME=$(basename $WSREP_SST_OPT_BINLOG)
@@ -1161,13 +1127,11 @@ then
 
         if [ $? -ne 0 ];
         then
-            wsrep_log_error "${INNOBACKUPEX_BIN} apply finished with errors. Check syslog or ${INNOAPPLYLOG} for details"
+            wsrep_log_error "${MARIABACKUP_BIN} apply finished with errors. Check syslog or ${INNOAPPLYLOG} for details"
             exit 22
         fi
 
         MAGIC_FILE="${TDATA}/${INFO_FILE}"
-        set +e
-        set -e
         wsrep_log_info "Moving the backup to ${TDATA}"
         timeit "Xtrabackup move stage" "$INNOMOVE"
         if [[ $? -eq 0 ]];then

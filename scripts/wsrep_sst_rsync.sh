@@ -29,6 +29,7 @@ OS=$(uname)
 export PATH="/usr/sbin:/sbin:$PATH"
 
 . $(dirname $0)/wsrep_sst_common
+wsrep_check_datadir
 
 wsrep_check_programs rsync
 
@@ -134,23 +135,21 @@ BINLOG_TAR_FILE="$WSREP_SST_OPT_DATA/wsrep_sst_binlog.tar"
 BINLOG_N_FILES=1
 rm -f "$BINLOG_TAR_FILE" || :
 
-if ! [ -z $WSREP_SST_OPT_BINLOG ]
-then
+if [ -n "$WSREP_SST_OPT_BINLOG" ]; then
     BINLOG_DIRNAME=$(dirname $WSREP_SST_OPT_BINLOG)
     BINLOG_FILENAME=$(basename $WSREP_SST_OPT_BINLOG)
     BINLOG_INDEX_DIRNAME=$(dirname $WSREP_SST_OPT_BINLOG)
     BINLOG_INDEX_FILENAME=$(basename $WSREP_SST_OPT_BINLOG)
 fi
 
-if ! [ -z $WSREP_SST_OPT_BINLOG_INDEX ]
-then
+if [ -n "$WSREP_SST_OPT_BINLOG_INDEX" ]; then
     BINLOG_INDEX_DIRNAME=$(dirname $WSREP_SST_OPT_BINLOG_INDEX)
     BINLOG_INDEX_FILENAME=$(basename $WSREP_SST_OPT_BINLOG_INDEX)
 fi
 
 WSREP_LOG_DIR=${WSREP_LOG_DIR:-""}
 # Try to set WSREP_LOG_DIR from the command line:
-if [ ! -z "$INNODB_LOG_GROUP_HOME_ARG" ]; then
+if [ -n "$INNODB_LOG_GROUP_HOME_ARG" ]; then
     WSREP_LOG_DIR=$INNODB_LOG_GROUP_HOME_ARG
 fi
 # if no command line arg and WSREP_LOG_DIR is not set,
@@ -172,7 +171,7 @@ fi
 
 INNODB_DATA_HOME_DIR=${INNODB_DATA_HOME_DIR:-""}
 # Try to set INNODB_DATA_HOME_DIR from the command line:
-if [ ! -z "$INNODB_DATA_HOME_DIR_ARG" ]; then
+if [ -n "$INNODB_DATA_HOME_DIR_ARG" ]; then
     INNODB_DATA_HOME_DIR=$INNODB_DATA_HOME_DIR_ARG
 fi
 # if no command line arg and INNODB_DATA_HOME_DIR environment variable
@@ -271,17 +270,17 @@ EOF
 
         sync
 
-        if ! [ -z $WSREP_SST_OPT_BINLOG ]
-        then
+        if [ -n "$WSREP_SST_OPT_BINLOG" ]; then
             # Prepare binlog files
             OLD_PWD="$(pwd)"
             cd $BINLOG_DIRNAME
 
-            if ! [ -z $WSREP_SST_OPT_BINLOG_INDEX ]
-               binlog_files_full=$(tail -n $BINLOG_N_FILES ${BINLOG_FILENAME}.index)
+            if [ -z "$WSREP_SST_OPT_BINLOG_INDEX" ]
             then
-               cd $BINLOG_INDEX_DIRNAME
-               binlog_files_full=$(tail -n $BINLOG_N_FILES ${BINLOG_INDEX_FILENAME}.index)
+                binlog_files_full=$(tail -n $BINLOG_N_FILES ${BINLOG_FILENAME}.index)
+            else
+                cd $BINLOG_INDEX_DIRNAME
+                binlog_files_full=$(tail -n $BINLOG_N_FILES ${BINLOG_INDEX_FILENAME}.index)
             fi
 
             cd $BINLOG_DIRNAME
@@ -291,11 +290,11 @@ EOF
                 binlog_files="$binlog_files $(basename $ii)"
             done
 
-            if ! [ -z "$binlog_files" ]
-            then
+            if [ -n "$binlog_files" ]; then
                 wsrep_log_info "Preparing binlog files for transfer:"
                 tar -cvf $BINLOG_TAR_FILE $binlog_files >&2
             fi
+
             cd "$OLD_PWD"
         fi
 
@@ -415,18 +414,8 @@ then
     rm -rf "$RSYNC_PID"
 
     ADDR=$WSREP_SST_OPT_ADDR
-    if [ "${ADDR#\[}" != "$ADDR" ]; then
-        RSYNC_PORT=$(echo $ADDR | awk -F '\\]:' '{ print $2 }')
-        RSYNC_ADDR=$(echo $ADDR | awk -F '\\]:' '{ print $1 }')"]"
-    else
-        RSYNC_PORT=$(echo $ADDR | awk -F ':' '{ print $2 }')
-        RSYNC_ADDR=$(echo $ADDR | awk -F ':' '{ print $1 }')
-    fi
-    if [ -z "$RSYNC_PORT" ]
-    then
-        RSYNC_PORT=4444
-        ADDR="$RSYNC_ADDR:$RSYNC_PORT"
-    fi
+    RSYNC_PORT=$WSREP_SST_OPT_PORT
+    RSYNC_ADDR=$WSREP_SST_OPT_HOST
 
     trap "exit 32" HUP PIPE
     trap "exit 3"  INT TERM ABRT
@@ -457,7 +446,6 @@ EOF
 
 #    rm -rf "$DATA"/ib_logfile* # we don't want old logs around
 
-    readonly RSYNC_PORT=${WSREP_SST_OPT_PORT:-4444}
     # If the IP is local listen only in it
     if is_local_ip "$RSYNC_ADDR"
     then
@@ -516,30 +504,31 @@ EOF
         exit 32
     fi
 
-    if ! [ -z $WSREP_SST_OPT_BINLOG ]
-    then
+    if [ -n "$WSREP_SST_OPT_BINLOG" ]; then
 
         OLD_PWD="$(pwd)"
         cd $BINLOG_DIRNAME
 
-        if [ -f $BINLOG_TAR_FILE ]
-        then
+        if [ -f "$BINLOG_TAR_FILE" ]; then
             # Clean up old binlog files first
             rm -f ${BINLOG_FILENAME}.*
             wsrep_log_info "Extracting binlog files:"
             tar -xvf $BINLOG_TAR_FILE >&2
             for ii in $(ls -1 ${BINLOG_FILENAME}.*)
             do
-                if ! [ -z $WSREP_SST_OPT_BINLOG_INDEX ]
-                  echo ${BINLOG_DIRNAME}/${ii} >> ${BINLOG_FILENAME}.index
-		then
-                  echo ${BINLOG_DIRNAME}/${ii} >> ${BINLOG_INDEX_DIRNAME}/${BINLOG_INDEX_FILENAME}.index
+                if [ -z "$WSREP_SST_OPT_BINLOG_INDEX" ]
+                then
+                    echo ${BINLOG_DIRNAME}/${bin_file} >> ${BINLOG_FILENAME}.index
+                else
+                    echo ${BINLOG_DIRNAME}/${ii} >> ${BINLOG_INDEX_DIRNAME}/${BINLOG_INDEX_FILENAME}.index
                 fi
             done
         fi
+
         cd "$OLD_PWD"
 
     fi
+
     if [ -r "$MAGIC_FILE" ]
     then
         # UUID:seqno & wsrep_gtid_domain_id is received here.

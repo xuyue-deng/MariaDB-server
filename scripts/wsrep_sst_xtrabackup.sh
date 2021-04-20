@@ -18,10 +18,8 @@
 # Optional dependencies and options documented here: http://www.percona.com/doc/percona-xtradb-cluster/manual/xtrabackup_sst.html 
 # Make sure to read that before proceeding!
 
-
-
-
 . $(dirname $0)/wsrep_sst_common
+wsrep_check_datadir
 
 ealgo=""
 ekey=""
@@ -134,7 +132,7 @@ get_keys()
 
 get_transfer()
 {
-    TSST_PORT=${WSREP_SST_OPT_PORT:-4444}
+    TSST_PORT=$WSREP_SST_OPT_PORT
 
     if [[ $tfmt == 'nc' ]];then
         if [[ ! -x `which nc` ]];then 
@@ -532,9 +530,9 @@ then
     # May need xtrabackup_checkpoints later on
     rm -f ${DATA}/xtrabackup_binary ${DATA}/xtrabackup_galera_info  ${DATA}/xtrabackup_logfile
 
-    ADDR="${WSREP_SST_OPT_HOST}:${WSREP_SST_OPT_PORT:-4444}"
+    ADDR="${WSREP_SST_OPT_HOST}:${WSREP_SST_OPT_PORT}"
 
-    wait_for_listen ${WSREP_SST_OPT_PORT:-4444} ${ADDR} ${MODULE} &
+    wait_for_listen ${WSREP_SST_OPT_PORT} ${ADDR} ${MODULE} &
 
     trap sig_joiner_cleanup HUP PIPE INT TERM
     trap cleanup_joiner EXIT
