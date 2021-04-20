@@ -236,6 +236,11 @@ case "$1" in
                           readonly LOG_BIN_ARG="$value"
                       fi
                       ;;
+                  '--datadir'|'-h')
+                      if [ -z "$WSREP_SST_OPT_DATA" ]; then
+                          readonly WSREP_SST_OPT_DATA="$value"
+                      fi
+                      ;;
               esac
               if [ -z "$original_cmd" ]; then
                   original_cmd="$1"
@@ -329,7 +334,13 @@ fi
 readonly WSREP_SST_OPT_USER
 readonly WSREP_SST_OPT_PSWD
 
-if [ -n "${WSREP_SST_OPT_DATA:-}" ]
+if [ -z "${WSREP_SST_OPT_DATA}" ]
+then
+  wsrep_log_error "The '--datadir' parameter must be passed to the SST script"
+  return
+fi
+
+if [ -n "${WSREP_SST_OPT_DATA}" ]
 then
     SST_PROGRESS_FILE="$WSREP_SST_OPT_DATA/sst_in_progress"
 else

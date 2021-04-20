@@ -56,8 +56,6 @@ sfmt="tar"
 strmcmd=""
 tfmt=""
 tcmd=""
-rebuild=0
-rebuildcmd=""
 payload=0
 pvformat="-F '%N => Rate:%r Avg:%a Elapsed:%t %e Bytes: %b %p' "
 pvopts="-f -i 10 -N $WSREP_SST_OPT_ROLE "
@@ -84,8 +82,8 @@ pcmd="pv $pvopts"
 declare -a RC
 
 set +e
-INNOBACKUPEX_BIN=$(which mariabackup)
-if test -z $INNOBACKUPEX_BIN
+MARIABACKUP_BIN=$(which mariabackup)
+if test -z $MARIABACKUP_BIN
 then
   wsrep_log_error 'mariabackup binary not found in $PATH'
   exit 42
@@ -357,7 +355,6 @@ read_cnf()
     encrypt=$(parse_cnf sst encrypt 0)
     sockopt=$(parse_cnf sst sockopt "")
     progress=$(parse_cnf sst progress "")
-    rebuild=$(parse_cnf sst rebuild 0)
     ttime=$(parse_cnf sst time 0)
     cpat=$(parse_cnf sst cpat '.*galera\.cache$\|.*sst_in_progress$\|.*\.sst$\|.*gvwstate\.dat$\|.*grastate\.dat$\|.*\.err$\|.*\.log$\|.*RPM_UPGRADE_MARKER$\|.*RPM_UPGRADE_HISTORY$')
     [[ $OS == "FreeBSD" ]] && cpat=$(parse_cnf sst cpat '.*galera\.cache$|.*sst_in_progress$|.*\.sst$|.*gvwstate\.dat$|.*grastate\.dat$|.*\.err$|.*\.log$|.*RPM_UPGRADE_MARKER$|.*RPM_UPGRADE_HISTORY$')
@@ -680,7 +677,7 @@ monitor_process()
     done
 }
 
-wsrep_check_programs "$INNOBACKUPEX_BIN"
+wsrep_check_programs "$MARIABACKUP_BIN"
 
 rm -f "${MAGIC_FILE}"
 
@@ -692,7 +689,7 @@ fi
 read_cnf
 setup_ports
 
-if ${INNOBACKUPEX_BIN} /tmp --help 2>/dev/null | grep -q -- '--version-check'; then
+if ${MARIABACKUP_BIN} --help 2>/dev/null | grep -q -- '--version-check'; then
     disver="--no-version-check"
 fi
 
@@ -735,7 +732,7 @@ if [[ $ssyslog -eq 1 ]];then
     if ! command -v logger >/dev/null;then
         wsrep_log_error "logger not in path: $PATH. Ignoring"
     else
-        wsrep_log_info "Logging all stderr of SST/Innobackupex to syslog"
+        wsrep_log_info "Logging all stderr of SST/mariabackup to syslog"
 
         exec 2> >(logger -p daemon.err -t ${ssystag}wsrep-sst-$WSREP_SST_OPT_ROLE)
 
@@ -749,9 +746,9 @@ if [[ $ssyslog -eq 1 ]];then
             logger  -p daemon.info -t ${ssystag}wsrep-sst-$WSREP_SST_OPT_ROLE "$@"
         }
 
-        INNOAPPLY="${INNOBACKUPEX_BIN} --prepare $disver $iapts \$INNOEXTRA $rebuildcmd --target-dir=\${DATA} 2>&1 | logger -p daemon.err -t ${ssystag}innobackupex-apply"
-        INNOMOVE="${INNOBACKUPEX_BIN} ${WSREP_SST_OPT_CONF} --move-back $disver $impts --force-non-empty-directories --target-dir=\${DATA} 2>&1 | logger -p daemon.err -t ${ssystag}innobackupex-move"
-        INNOBACKUP="${INNOBACKUPEX_BIN} ${WSREP_SST_OPT_CONF} --backup $disver $iopts \$tmpopts \$INNOEXTRA --galera-info --stream=\$sfmt --target-dir=\$itmpdir 2> >(logger -p daemon.err -t ${ssystag}innobackupex-backup)"
+        INNOAPPLY="${MARIABACKUP_BIN} --prepare $disver $iapts \$INNOEXTRA --target-dir=\${DATA} --datadir=\${DATA} 2>&1 | logger -p daemon.err -t ${ssystag}innobackupex-apply"
+        INNOMOVE="${MARIABACKUP_BIN} ${WSREP_SST_OPT_CONF} --move-back $disver $impts --force-non-empty-directories --target-dir=\${DATA} --datadir=\${TDATA} 2>&1 | logger -p daemon.err -t ${ssystag}innobackupex-move"
+        INNOBACKUP="${MARIABACKUP_BIN} ${WSREP_SST_OPT_CONF} --backup $disver $iopts \$tmpopts \$INNOEXTRA --galera-info --stream=\$sfmt --target-dir=\$itmpdir --datadir=\${DATA} 2> >(logger -p daemon.err -t ${ssystag}innobackupex-backup)"
     fi
 
 else
@@ -811,9 +808,9 @@ then
     fi
 fi
 
-    INNOAPPLY="${INNOBACKUPEX_BIN} --prepare $disver $iapts \$INNOEXTRA $rebuildcmd --target-dir=\${DATA} &> ${INNOAPPLYLOG}"
-    INNOMOVE="${INNOBACKUPEX_BIN} ${WSREP_SST_OPT_CONF} --move-back $disver $impts --force-non-empty-directories --target-dir=\${DATA} &> ${INNOMOVELOG}"
-    INNOBACKUP="${INNOBACKUPEX_BIN} ${WSREP_SST_OPT_CONF} --backup $disver $iopts \$tmpopts \$INNOEXTRA --galera-info --stream=\$sfmt --target-dir=\$itmpdir 2> ${INNOBACKUPLOG}"
+    INNOAPPLY="${MARIABACKUP_BIN} --prepare $disver $iapts \$INNOEXTRA --target-dir=\${DATA} --datadir=\${DATA} &> ${INNOAPPLYLOG}"
+    INNOMOVE="${MARIABACKUP_BIN} ${WSREP_SST_OPT_CONF} --move-back $disver $impts --force-non-empty-directories --target-dir=\${DATA} --datadir=\${TDATA} &> ${INNOMOVELOG}"
+    INNOBACKUP="${MARIABACKUP_BIN} ${WSREP_SST_OPT_CONF} --backup $disver $iopts \$tmpopts \$INNOEXTRA --galera-info --stream=\$sfmt --target-dir=\$itmpdir --datadir=\${DATA} 2> ${INNOBACKUPLOG}"
 
 fi
 
@@ -842,7 +839,7 @@ then
         fi
 
         itmpdir=$(mktemp -d)
-        wsrep_log_info "Using $itmpdir as innobackupex temporary directory"
+        wsrep_log_info "Using $itmpdir as mariabackup temporary directory"
 
         if [[ -n "${WSREP_SST_OPT_USER:-}" && "$WSREP_SST_OPT_USER" != "(null)" ]]; then
            INNOEXTRA+=" --user=$WSREP_SST_OPT_USER"
@@ -910,7 +907,7 @@ then
         set -e
 
         if [ ${RC[0]} -ne 0 ]; then
-          wsrep_log_error "${INNOBACKUPEX_BIN} finished with error: ${RC[0]}. " \
+          wsrep_log_error "${MARIABACKUP_BIN} finished with error: ${RC[0]}. " \
                           "Check syslog or ${INNOBACKUPLOG} for details"
           exit 22
         elif [[ ${RC[$(( ${#RC[@]}-1 ))]} -eq 1 ]];then
@@ -918,7 +915,7 @@ then
           exit 22
         fi
 
-        # innobackupex implicitly writes PID to fixed location in $xtmpdir
+        # mariabackup implicitly writes PID to fixed location in $xtmpdir
         XTRABACKUP_PID="$xtmpdir/xtrabackup_pid"
 
     else # BYPASS FOR IST
@@ -1083,20 +1080,8 @@ then
         get_proc
 
         if [[ ! -s ${DATA}/xtrabackup_checkpoints ]];then
-            wsrep_log_error "xtrabackup_checkpoints missing, failed innobackupex/SST on donor"
+            wsrep_log_error "xtrabackup_checkpoints missing, failed mariabackup/SST on donor"
             exit 2
-        fi
-
-        # Rebuild indexes for compact backups
-        if grep -q 'compact = 1' ${DATA}/xtrabackup_checkpoints;then
-            wsrep_log_info "Index compaction detected"
-            rebuild=1
-        fi
-
-        if [[ $rebuild -eq 1 ]];then
-            nthreads=$(parse_cnf xtrabackup rebuild-threads $nproc)
-            wsrep_log_info "Rebuilding during prepare with $nthreads threads"
-            rebuildcmd="--rebuild-indexes --rebuild-threads=$nthreads"
         fi
 
         if test -n "$(find ${DATA} -maxdepth 1 -type f -name '*.qp' -print -quit)";then
@@ -1161,7 +1146,7 @@ then
 
         if [ $? -ne 0 ];
         then
-            wsrep_log_error "${INNOBACKUPEX_BIN} apply finished with errors. Check syslog or ${INNOAPPLYLOG} for details"
+            wsrep_log_error "${MARIABACKUP_BIN} apply finished with errors. Check syslog or ${INNOAPPLYLOG} for details"
             exit 22
         fi
 
