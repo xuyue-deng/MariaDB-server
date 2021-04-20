@@ -18,10 +18,8 @@
 # Documentation: http://www.percona.com/doc/percona-xtradb-cluster/manual/xtrabackup_sst.html 
 # Make sure to read that before proceeding!
 
-
-
-
 . $(dirname $0)/wsrep_sst_common
+wsrep_check_datadir
 
 ealgo=""
 ekey=""

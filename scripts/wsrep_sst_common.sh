@@ -215,6 +215,7 @@ case "$1" in
               if [ "$value" == "$1" ]; then
                  value=""
               fi
+              skip_mysqld_arg=0
               case "$option" in
                   '--innodb-data-home-dir')
                       if [ -z "$INNODB_DATA_HOME_DIR_ARG" ]; then
@@ -236,11 +237,19 @@ case "$1" in
                           readonly LOG_BIN_ARG="$value"
                       fi
                       ;;
+                  '--datadir'|'-h')
+                      if [ -z "$WSREP_SST_OPT_DATA" ]; then
+                          readonly WSREP_SST_OPT_DATA="$value"
+                      fi
+                      skip_mysqld_arg=1
+                      ;;
               esac
-              if [ -z "$original_cmd" ]; then
-                  original_cmd="$1"
-              else
-                  original_cmd="$original_cmd $1"
+              if [ $skip_mysqld_arg -eq 0 ]; then
+                  if [ -z "$original_cmd" ]; then
+                      original_cmd="$1"
+                  else
+                      original_cmd="$original_cmd $1"
+                  fi
               fi
            fi
            shift
@@ -279,13 +288,13 @@ CLIENT_DIR="$SCRIPTS_DIR/../client"
 if [ -x "$CLIENT_DIR/mysql" ]; then
     MYSQL_CLIENT="$CLIENT_DIR/mysql"
 else
-    MYSQL_CLIENT=$(which mysql)
+    MYSQL_CLIENT="$(command -v mysql)"
 fi
 
 if [ -x "$CLIENT_DIR/mysqldump" ]; then
     MYSQLDUMP="$CLIENT_DIR/mysqldump"
 else
-    MYSQLDUMP=$(which mysqldump)
+    MYSQLDUMP="$(command -v mysqldump)"
 fi
 
 if [ -x "$SCRIPTS_DIR/my_print_defaults" ]; then
@@ -293,7 +302,7 @@ if [ -x "$SCRIPTS_DIR/my_print_defaults" ]; then
 elif [ -x "$EXTRA_DIR/my_print_defaults" ]; then
     MY_PRINT_DEFAULTS="$EXTRA_DIR/my_print_defaults"
 else
-    MY_PRINT_DEFAULTS=$(which my_print_defaults)
+    MY_PRINT_DEFAULTS="$(command -v my_print_defaults)"
 fi
 
 wsrep_defaults="$WSREP_SST_OPT_DEFAULT"
@@ -368,7 +377,7 @@ wsrep_check_program()
 {
     local prog=$1
 
-    if ! which $prog >/dev/null
+    if ! [ -x "$(command -v $prog)" ];
     then
         echo "'$prog' not found in PATH"
         return 2 # no such file or directory
@@ -386,6 +395,15 @@ wsrep_check_programs()
     done
 
     return $ret
+}
+
+wsrep_check_datadir()
+{
+    if [ -z "${WSREP_SST_OPT_DATA}" ]
+    then
+        wsrep_log_error "The '--datadir' parameter must be passed to the SST script"
+        exit 2
+    fi
 }
 
 #
@@ -406,7 +424,7 @@ parse_cnf()
     # then search for needed variable
     # finally get the variable value (if variables has been specified multiple time use the last value only)
 
-    reval=$($MY_PRINT_DEFAULTS "${group}" | awk -v var="${var}" 'BEGIN { OFS=FS="=" } { gsub(/_/,"-",$1); if ( $1=="--"var) lastval=substr($0,length($1)+2) } END { print lastval}')
+    reval=$($MY_PRINT_DEFAULTS "$group" | awk 'BEGIN {OFS=FS="="} {gsub(/_/,"-",$1); if ($1=="--'"$var"'") lastval=substr($0,length($1)+2)} END {print lastval}')
 
     # use default if we haven't found a value
     if [ -z "$reval" ]; then

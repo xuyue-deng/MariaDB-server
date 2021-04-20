@@ -29,6 +29,7 @@ OS=$(uname)
 export PATH="/usr/sbin:/sbin:$PATH"
 
 . $(dirname $0)/wsrep_sst_common
+wsrep_check_datadir
 
 wsrep_check_programs rsync
 

@@ -21,6 +21,7 @@
 # Make sure to read that before proceeding!
 
 . $(dirname $0)/wsrep_sst_common
+wsrep_check_datadir
 
 OS=$(uname)
 ealgo=""
@@ -56,8 +57,6 @@ sfmt="tar"
 strmcmd=""
 tfmt=""
 tcmd=""
-rebuild=0
-rebuildcmd=""
 payload=0
 pvformat="-F '%N => Rate:%r Avg:%a Elapsed:%t %e Bytes: %b %p' "
 pvopts="-f -i 10 -N $WSREP_SST_OPT_ROLE "
@@ -84,8 +83,8 @@ pcmd="pv $pvopts"
 declare -a RC
 
 set +e
-INNOBACKUPEX_BIN=$(which mariabackup)
-if test -z $INNOBACKUPEX_BIN
+MARIABACKUP_BIN="$(command -v mariabackup)"
+if test -z $MARIABACKUP_BIN
 then
   wsrep_log_error 'mariabackup binary not found in $PATH'
   exit 42
@@ -290,21 +289,6 @@ get_transfer()
     fi
 }
 
-parse_cnf()
-{
-    local group=$1
-    local var=$2
-    # print the default settings for given group using my_print_default.
-    # normalize the variable names specified in cnf file (user can use _ or - for example log-bin or log_bin)
-    # then grep for needed variable
-    # finally get the variable value (if variables has been specified multiple time use the last value only)
-    reval=$($MY_PRINT_DEFAULTS $group | awk -F= '{if ($1 ~ /_/) { gsub(/_/,"-",$1); print $1"="$2 } else { print $0 }}' | grep -- "--$var=" | cut -d= -f2- | tail -1)
-    if [[ -z $reval ]];then
-        [[ -n $3 ]] && reval=$3
-    fi
-    echo $reval
-}
-
 get_footprint()
 {
     pushd $WSREP_SST_OPT_DATA 1>/dev/null
@@ -351,28 +335,34 @@ read_cnf()
 {
     sfmt=$(parse_cnf sst streamfmt "xbstream")
     tfmt=$(parse_cnf sst transferfmt "socat")
-    tcert=$(parse_cnf sst tca "")
-    tpem=$(parse_cnf sst tcert "")
-    tkey=$(parse_cnf sst tkey "")
+
     encrypt=$(parse_cnf sst encrypt 0)
+    if [[ $encrypt -ge 2 ]]; then
+        tcert=$(parse_cnf sst tca "")
+        tpem=$(parse_cnf sst tcert "")
+        if [[ $encrypt -ge 3 ]]; then
+            tkey=$(parse_cnf sst tkey "")
+        fi
+    elif [[ $encrypt -ne -1 ]];then
+        # Refer to http://www.percona.com/doc/percona-xtradb-cluster/manual/xtrabackup_sst.html
+        ealgo=$(parse_cnf xtrabackup encrypt "")
+        if [[ -z $ealgo ]];then
+            ealgo=$(parse_cnf sst encrypt-algo "")
+            ekey=$(parse_cnf sst encrypt-key "")
+            ekeyfile=$(parse_cnf sst encrypt-key-file "")
+        else
+           ekey=$(parse_cnf xtrabackup encrypt-key "")
+           ekeyfile=$(parse_cnf xtrabackup encrypt-key-file "")
+        fi
+    fi
+
     sockopt=$(parse_cnf sst sockopt "")
     progress=$(parse_cnf sst progress "")
-    rebuild=$(parse_cnf sst rebuild 0)
     ttime=$(parse_cnf sst time 0)
     cpat=$(parse_cnf sst cpat '.*galera\.cache$\|.*sst_in_progress$\|.*\.sst$\|.*gvwstate\.dat$\|.*grastate\.dat$\|.*\.err$\|.*\.log$\|.*RPM_UPGRADE_MARKER$\|.*RPM_UPGRADE_HISTORY$')
     [[ $OS == "FreeBSD" ]] && cpat=$(parse_cnf sst cpat '.*galera\.cache$|.*sst_in_progress$|.*\.sst$|.*gvwstate\.dat$|.*grastate\.dat$|.*\.err$|.*\.log$|.*RPM_UPGRADE_MARKER$|.*RPM_UPGRADE_HISTORY$')
-    ealgo=$(parse_cnf xtrabackup encrypt "")
-    ekey=$(parse_cnf xtrabackup encrypt-key "")
-    ekeyfile=$(parse_cnf xtrabackup encrypt-key-file "")
     scomp=$(parse_cnf sst compressor "")
     sdecomp=$(parse_cnf sst decompressor "")
-
-    # Refer to http://www.percona.com/doc/percona-xtradb-cluster/manual/xtrabackup_sst.html
-    if [[ -z $ealgo ]];then
-        ealgo=$(parse_cnf sst encrypt-algo "")
-        ekey=$(parse_cnf sst encrypt-key "")
-        ekeyfile=$(parse_cnf sst encrypt-key-file "")
-    fi
 
     rlimit=$(parse_cnf sst rlimit "")
     uextra=$(parse_cnf sst use-extra 0)
@@ -680,7 +670,7 @@ monitor_process()
     done
 }
 
-wsrep_check_programs "$INNOBACKUPEX_BIN"
+wsrep_check_programs "$MARIABACKUP_BIN"
 
 rm -f "${MAGIC_FILE}"
 
@@ -692,7 +682,7 @@ fi
 read_cnf
 setup_ports
 
-if ${INNOBACKUPEX_BIN} /tmp --help 2>/dev/null | grep -q -- '--version-check'; then
+if ${MARIABACKUP_BIN} --help 2>/dev/null | grep -q -- '--version-check'; then
     disver="--no-version-check"
 fi
 
@@ -703,7 +693,7 @@ if [[ ${FORCE_FTWRL:-0} -eq 1 ]];then
     iopts+=" --no-backup-locks"
 fi
 
-INNOEXTRA=$WSREP_SST_OPT_MYSQLD
+INNOEXTRA=
 
 INNODB_DATA_HOME_DIR=${INNODB_DATA_HOME_DIR:-""}
 # Try to set INNODB_DATA_HOME_DIR from the command line:
@@ -735,7 +725,7 @@ if [[ $ssyslog -eq 1 ]];then
     if ! command -v logger >/dev/null;then
         wsrep_log_error "logger not in path: $PATH. Ignoring"
     else
-        wsrep_log_info "Logging all stderr of SST/Innobackupex to syslog"
+        wsrep_log_info "Logging all stderr of SST/mariabackup to syslog"
 
         exec 2> >(logger -p daemon.err -t ${ssystag}wsrep-sst-$WSREP_SST_OPT_ROLE)
 
@@ -748,11 +738,11 @@ if [[ $ssyslog -eq 1 ]];then
         {
             logger  -p daemon.info -t ${ssystag}wsrep-sst-$WSREP_SST_OPT_ROLE "$@"
         }
-
-        INNOAPPLY="${INNOBACKUPEX_BIN} --prepare $disver $iapts \$INNOEXTRA $rebuildcmd --target-dir=\${DATA} 2>&1 | logger -p daemon.err -t ${ssystag}innobackupex-apply"
-        INNOMOVE="${INNOBACKUPEX_BIN} ${WSREP_SST_OPT_CONF} --move-back $disver $impts --force-non-empty-directories --target-dir=\${DATA} 2>&1 | logger -p daemon.err -t ${ssystag}innobackupex-move"
-        INNOBACKUP="${INNOBACKUPEX_BIN} ${WSREP_SST_OPT_CONF} --backup $disver $iopts \$tmpopts \$INNOEXTRA --galera-info --stream=\$sfmt --target-dir=\$itmpdir 2> >(logger -p daemon.err -t ${ssystag}innobackupex-backup)"
     fi
+
+    INNOAPPLY="2>&1 | logger -p daemon.err -t ${ssystag}innobackupex-apply"
+    INNOMOVE="2>&1 | logger -p daemon.err -t ${ssystag}innobackupex-move"
+    INNOBACKUP="2> >(logger -p daemon.err -t ${ssystag}innobackupex-backup)"
 
 else
 
@@ -790,7 +780,6 @@ then
         else
             newfile=${INNOMOVELOG}.${ARCHIVETIMESTAMP}
         fi
-
         wsrep_log_info "Moving ${INNOMOVELOG} to ${newfile}"
         mv "${INNOMOVELOG}" "${newfile}"
         gzip "${newfile}"
@@ -804,18 +793,21 @@ then
         else
             newfile=${INNOBACKUPLOG}.${ARCHIVETIMESTAMP}
         fi
-
         wsrep_log_info "Moving ${INNOBACKUPLOG} to ${newfile}"
         mv "${INNOBACKUPLOG}" "${newfile}"
         gzip "${newfile}"
     fi
 fi
 
-    INNOAPPLY="${INNOBACKUPEX_BIN} --prepare $disver $iapts \$INNOEXTRA $rebuildcmd --target-dir=\${DATA} &> ${INNOAPPLYLOG}"
-    INNOMOVE="${INNOBACKUPEX_BIN} ${WSREP_SST_OPT_CONF} --move-back $disver $impts --force-non-empty-directories --target-dir=\${DATA} &> ${INNOMOVELOG}"
-    INNOBACKUP="${INNOBACKUPEX_BIN} ${WSREP_SST_OPT_CONF} --backup $disver $iopts \$tmpopts \$INNOEXTRA --galera-info --stream=\$sfmt --target-dir=\$itmpdir 2> ${INNOBACKUPLOG}"
+    INNOAPPLY="&> ${INNOAPPLYLOG}"
+    INNOMOVE="&> ${INNOMOVELOG}"
+    INNOBACKUP="2> ${INNOBACKUPLOG}"
 
 fi
+
+INNOAPPLY="${MARIABACKUP_BIN} --prepare $disver $iapts \$INNOEXTRA --target-dir=\${DATA} --datadir=\${DATA} --mysqld-args \$WSREP_SST_OPT_MYSQLD $INNOAPPLY"
+INNOMOVE="${MARIABACKUP_BIN} ${WSREP_SST_OPT_CONF} --move-back $disver $impts --force-non-empty-directories --target-dir=\${DATA} --datadir=\${TDATA} $INNOMOVE"
+INNOBACKUP="${MARIABACKUP_BIN} ${WSREP_SST_OPT_CONF} --backup $disver $iopts \$tmpopts \$INNOEXTRA --galera-info --stream=\$sfmt --target-dir=\$itmpdir --datadir=\${DATA} --mysqld-args \$WSREP_SST_OPT_MYSQLD $INNOBACKUP"
 
 get_stream
 get_transfer
@@ -842,7 +834,7 @@ then
         fi
 
         itmpdir=$(mktemp -d)
-        wsrep_log_info "Using $itmpdir as innobackupex temporary directory"
+        wsrep_log_info "Using $itmpdir as mariabackup temporary directory"
 
         if [[ -n "${WSREP_SST_OPT_USER:-}" && "$WSREP_SST_OPT_USER" != "(null)" ]]; then
            INNOEXTRA+=" --user=$WSREP_SST_OPT_USER"
@@ -856,15 +848,6 @@ then
             unset MYSQL_PWD
         fi
 
-        get_keys
-        if [[ $encrypt -eq 1 ]];then
-            if [[ -n $ekey ]];then
-                INNOEXTRA+=" --encrypt=$ealgo --encrypt-key=$ekey"
-            else
-                INNOEXTRA+=" --encrypt=$ealgo --encrypt-key-file=$ekeyfile"
-            fi
-        fi
-
         check_extra
 
         wsrep_log_info "Streaming GTID file before SST"
@@ -875,19 +858,19 @@ then
 
         ttcmd="$tcmd"
 
+        if [[ -n $scomp ]];then
+            tcmd="$scomp | $tcmd"
+        fi
+
+        get_keys
         if [[ $encrypt -eq 1 ]];then
-            if [[ -n $scomp ]];then
-                tcmd=" $ecmd | $scomp | $tcmd "
-            else
-                tcmd=" $ecmd | $tcmd "
-            fi
-        elif [[ -n $scomp ]];then
-            tcmd=" $scomp | $tcmd "
+            tcmd="$ecmd | $tcmd"
         fi
 
         send_donor $DATA "${stagemsg}-gtid"
 
         tcmd="$ttcmd"
+
         if [[ -n $progress ]];then
             get_footprint
             tcmd="$pcmd | $tcmd"
@@ -910,7 +893,7 @@ then
         set -e
 
         if [ ${RC[0]} -ne 0 ]; then
-          wsrep_log_error "${INNOBACKUPEX_BIN} finished with error: ${RC[0]}. " \
+          wsrep_log_error "${MARIABACKUP_BIN} finished with error: ${RC[0]}. " \
                           "Check syslog or ${INNOBACKUPLOG} for details"
           exit 22
         elif [[ ${RC[$(( ${#RC[@]}-1 ))]} -eq 1 ]];then
@@ -918,7 +901,7 @@ then
           exit 22
         fi
 
-        # innobackupex implicitly writes PID to fixed location in $xtmpdir
+        # mariabackup implicitly writes PID to fixed location in $xtmpdir
         XTRABACKUP_PID="$xtmpdir/xtrabackup_pid"
 
     else # BYPASS FOR IST
@@ -930,16 +913,16 @@ then
         # (separated by a space).
         echo "${WSREP_SST_OPT_GTID} ${WSREP_SST_OPT_GTID_DOMAIN_ID}" > "${MAGIC_FILE}"
         echo "1" > "${DATA}/${IST_FILE}"
+
+        if [[ -n $scomp ]];then
+            tcmd="$scomp | $tcmd"
+        fi
+
         get_keys
         if [[ $encrypt -eq 1 ]];then
-            if [[ -n $scomp ]];then
-                tcmd=" $ecmd | $scomp | $tcmd "
-            else
-                tcmd=" $ecmd | $tcmd "
-            fi
-        elif [[ -n $scomp ]];then
-            tcmd=" $scomp | $tcmd "
+            tcmd="$ecmd | $tcmd"
         fi
+
         strmcmd+=" \${IST_FILE}"
 
         send_donor $DATA "${stagemsg}-IST"
@@ -1083,20 +1066,8 @@ then
         get_proc
 
         if [[ ! -s ${DATA}/xtrabackup_checkpoints ]];then
-            wsrep_log_error "xtrabackup_checkpoints missing, failed innobackupex/SST on donor"
+            wsrep_log_error "xtrabackup_checkpoints missing, failed mariabackup/SST on donor"
             exit 2
-        fi
-
-        # Rebuild indexes for compact backups
-        if grep -q 'compact = 1' ${DATA}/xtrabackup_checkpoints;then
-            wsrep_log_info "Index compaction detected"
-            rebuild=1
-        fi
-
-        if [[ $rebuild -eq 1 ]];then
-            nthreads=$(parse_cnf xtrabackup rebuild-threads $nproc)
-            wsrep_log_info "Rebuilding during prepare with $nthreads threads"
-            rebuildcmd="--rebuild-indexes --rebuild-threads=$nthreads"
         fi
 
         if test -n "$(find ${DATA} -maxdepth 1 -type f -name '*.qp' -print -quit)";then
@@ -1161,7 +1132,7 @@ then
 
         if [ $? -ne 0 ];
         then
-            wsrep_log_error "${INNOBACKUPEX_BIN} apply finished with errors. Check syslog or ${INNOAPPLYLOG} for details"
+            wsrep_log_error "${MARIABACKUP_BIN} apply finished with errors. Check syslog or ${INNOAPPLYLOG} for details"
             exit 22
         fi
 
