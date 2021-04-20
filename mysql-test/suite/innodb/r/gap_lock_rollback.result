@@ -1,0 +1,57 @@
+create table t(k tinyint unsigned primary key) engine=innodb;
+insert into t values (60), (70), (80), (90), (100);
+insert into t values (160), (170), (180), (190), (200);
+begin;
+insert into t values (10);
+insert into t values (20);
+insert into t values (30);
+insert into t values (40);
+insert into t values (50);
+insert into t values (110);
+insert into t values (120);
+insert into t values (130);
+insert into t values (140);
+insert into t values (150);
+insert into t values (210);
+insert into t values (220);
+insert into t values (230);
+insert into t values (240);
+insert into t values (250);
+connect  prevent_purge,localhost,root,,;
+start transaction with consistent snapshot;
+connection default;
+rollback;
+connect  con1,localhost,root,,;
+set transaction isolation level serializable;
+begin;
+select * from t where k = 40;
+k
+select * from t where k = 140;
+k
+select * from t where k = 240;
+k
+connect  con2,localhost,root,,;
+SET session innodb_lock_wait_timeout=1;
+insert into t values (5);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+insert into t values (45);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+insert into t values (55);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+insert into t values (105);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+insert into t values (145);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+insert into t values (155);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+insert into t values (205);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+insert into t values (245);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+insert into t values (255);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+disconnect con2;
+disconnect con1;
+disconnect prevent_purge;
+connection default;
+drop table t;

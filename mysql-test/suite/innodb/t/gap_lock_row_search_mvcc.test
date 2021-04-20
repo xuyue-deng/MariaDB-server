@@ -1,6 +1,7 @@
 --source include/have_innodb.inc
 --source include/have_sequence.inc
 --source include/have_debug.inc
+--source include/count_sessions.inc
 
 SET @saved_frequency = @@GLOBAL.innodb_purge_rseg_truncate_frequency;
 SET GLOBAL innodb_purge_rseg_truncate_frequency = 1;
@@ -260,3 +261,5 @@ drop table t;
 } # while ($isolation_level)
 
 SET GLOBAL innodb_purge_rseg_truncate_frequency = @saved_frequency;
+--source include/wait_until_count_sessions.inc
+

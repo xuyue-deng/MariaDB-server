@@ -62,6 +62,9 @@ Gets the size of a lock struct.
 ulint
 lock_get_size(void);
 /*===============*/
+
+bool lock_rec_has_gap(buf_block_t *block, ulint heap_no);
+
 /*********************************************************************//**
 Creates the lock system at database start. */
 void
@@ -295,7 +298,8 @@ lock_rec_insert_check_and_lock(
 	dict_index_t*	index,	/*!< in: index */
 	que_thr_t*	thr,	/*!< in: query thread */
 	mtr_t*		mtr,	/*!< in/out: mini-transaction */
-	ibool*		inherit)/*!< out: set to TRUE if the new
+	ibool*		inherit,
+	bool first_rec)/*!< out: set to TRUE if the new
 				inserted record maybe should inherit
 				LOCK_GAP type locks from the successor
 				record */

@@ -1,0 +1,79 @@
+SET @saved_frequency = @@GLOBAL.innodb_purge_rseg_truncate_frequency;
+SET GLOBAL innodb_purge_rseg_truncate_frequency = 1;
+##########
+# test for isolation level 
+###
+#
+# Create parent table
+#
+create table parent(a int unsigned primary key) engine=innodb;
+connect  prevent_purge,localhost,root,,;
+start transaction with consistent snapshot;
+connection default;
+begin;
+#
+# Fill parent table
+#
+insert into parent select seq*10 from seq_1_to_16384;
+#
+# Create child table
+#
+CREATE TABLE child (
+id INT unsigned NOT NULL PRIMARY KEY,
+fl0_id INT unsigned,
+CONSTRAINT `fkl0`
+    FOREIGN KEY (fl0_id) REFERENCES parent (a)
+ON DELETE CASCADE
+ON UPDATE RESTRICT
+) ENGINE = InnoDB;
+#
+# Insert into child table
+#
+insert into child select seq*10, seq*10 from seq_1_to_16384;
+SET @pg = (4096 * 10);
+SET @pg_gap = ((4096 * 10)*6);
+SET @pg_not_gap = ((4096 * 10)*2);
+#
+# Insert some row in the parent table to have ability to insert
+# row with the same foreign key in the child table
+#
+insert into parent values(@pg + (@pg_gap/2) + 5);
+insert into parent values(55);
+insert into parent values((16384 * 10) - 55);;
+#
+# delete some range from child table
+#
+delete from child where id between @pg and @pg + @pg_gap;
+delete from child where id < 100;
+delete from child where id > ((16384 * 10) - 100);
+commit;
+begin;
+#
+# Delete some row from the parent table to lock gap in the child table
+#
+delete from parent where a = @pg + (@pg_gap/2);
+delete from parent where a = 60;
+delete from parent where a = ((16384*10) - 40);;
+connect  con1,localhost,root,,;
+set transaction isolation level serializable;
+begin;
+SET @pg = (4096 * 10);
+SET @pg_gap = ((4096 * 10)*6);
+SET @pg_not_gap = ((4096 * 10)*2);
+SET session innodb_lock_wait_timeout=1;
+#
+# Insert into locked gap
+#
+insert into child values(55, 55);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+insert into child values((16384 * 10) - 55, (16384 * 10) - 55);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+insert into child values(@pg + (@pg_gap/2) + 5, @pg + (@pg_gap/2) + 5);
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+disconnect con1;
+disconnect prevent_purge;
+connection default;
+rollback;
+drop table child;
+drop table parent;
+SET GLOBAL innodb_purge_rseg_truncate_frequency = @saved_frequency;

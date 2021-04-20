@@ -1462,8 +1462,6 @@ row_ins_set_exclusive_rec_lock(
 	return(err);
 }
 
-enum gap_lock_direction { NONE, FORWARD, BACKWARD };
-
 /***************************************************************//**
 Checks if foreign key constraint fails for an index entry. Sets shared locks
 which lock either the success or the failure of the constraint. NOTE that
@@ -1495,8 +1493,6 @@ row_ins_check_foreign_constraint(
 	mem_heap_t*	heap		= NULL;
 	rec_offs	offsets_[REC_OFFS_NORMAL_SIZE];
 	rec_offs*	offsets		= offsets_;
-	gap_lock_direction gl_dir = NONE;
-	btr_pcur_t	gap_lock_init_pcur;
 
 	bool		skip_gap_lock;
 
@@ -1644,8 +1640,7 @@ row_ins_check_foreign_constraint(
 		const buf_block_t*	block = btr_pcur_get_block(&pcur);
 
 		if (page_rec_is_infimum(rec)) {
-			if (gl_dir == BACKWARD)
-				goto change_gl_dir;
+
 			continue;
 		}
 
@@ -1673,9 +1668,10 @@ row_ins_check_foreign_constraint(
 
 		cmp = cmp_dtuple_rec(entry, rec, offsets);
 
+                bool deleted_flag = rec_get_deleted_flag(rec,
+                      rec_offs_comp(offsets));
 		if (cmp == 0) {
-			if (rec_get_deleted_flag(rec,
-						 rec_offs_comp(offsets))) {
+			if (deleted_flag) {
 				/* In delete-marked records, DB_TRX_ID must
 				always refer to an existing undo log record. */
 				ut_ad(!dict_index_is_clust(check_index)
@@ -1693,11 +1689,6 @@ row_ins_check_foreign_constraint(
 					break;
 				default:
 					goto end_scan;
-				}
-				if (!skip_gap_lock && gl_dir == NONE) {
-					gl_dir = BACKWARD;
-					btr_pcur_store_position(&pcur, &mtr);
-					btr_pcur_copy_stored_position(&gap_lock_init_pcur, &pcur);
 				}
 			} else {
 				/* Found a matching record. Lock only
@@ -1793,56 +1784,33 @@ row_ins_check_foreign_constraint(
 				}
 			}
 		} else {
-			ut_a(gl_dir == BACKWARD || cmp < 0);
+			ut_a(cmp < 0);
 
-			if (gl_dir != BACKWARD
-					|| rec_get_deleted_flag(rec, rec_offs_comp(offsets))) {
-				err = skip_gap_lock
-					? DB_SUCCESS
-					: row_ins_set_shared_rec_lock(
-						LOCK_GAP, block,
-						rec, check_index, offsets, thr);
+			err = skip_gap_lock
+				? DB_SUCCESS
+				: row_ins_set_shared_rec_lock(
+					deleted_flag ? LOCK_ORDINARY : LOCK_GAP,
+                                        block,
+					rec, check_index, offsets, thr);
 
-				switch (err) {
-				case DB_SUCCESS_LOCKED_REC:
-					err = DB_SUCCESS;
-					/* fall through */
-				case DB_SUCCESS:
-					if (check_ref) {
-						err = DB_NO_REFERENCED_ROW;
-						row_ins_foreign_report_add_err(
-							trx, foreign, rec, entry);
-					}
-				default:
-					break;
+			switch (err) {
+			case DB_SUCCESS_LOCKED_REC:
+				err = DB_SUCCESS;
+				/* fall through */
+			case DB_SUCCESS:
+				if (check_ref) {
+					err = DB_NO_REFERENCED_ROW;
+					row_ins_foreign_report_add_err(
+						trx, foreign, rec, entry);
 				}
+			default:
+				break;
 			}
-			if (!skip_gap_lock){
-				if(rec_get_deleted_flag(rec, rec_offs_comp(offsets))) {
-					if (gl_dir == NONE) {
-						gl_dir = BACKWARD;
-						btr_pcur_store_position(&pcur, &mtr);
-						btr_pcur_copy_stored_position(&gap_lock_init_pcur, &pcur);
-					}
-					continue;
-				}
-				else if (gl_dir == BACKWARD) {
-change_gl_dir:
-					mtr.commit();
-					mtr.start();
-					btr_pcur_copy_stored_position(&pcur, &gap_lock_init_pcur);
-					btr_pcur_restore_position(BTR_SEARCH_LEAF, &pcur, &mtr);
-					btr_pcur_free(&gap_lock_init_pcur);
-					gl_dir = FORWARD;
-					continue;
-				}
-			}
-			goto end_scan;
+
+                        if (skip_gap_lock || !deleted_flag)
+			      goto end_scan;
 		}
-
-	} while (gl_dir == BACKWARD ?
-						btr_pcur_move_to_prev(&pcur, &mtr) :
-						btr_pcur_move_to_next(&pcur, &mtr));
+	} while (btr_pcur_move_to_next(&pcur, &mtr));
 
 	if (check_ref) {
 		row_ins_foreign_report_add_err(
@@ -2197,7 +2165,8 @@ row_ins_scan_sec_index_for_duplicate(
 			goto end_scan;
 		}
 
-		if (page_rec_is_supremum(rec)) {
+		if (page_rec_is_supremum(rec) ||
+                    rec_get_deleted_flag(rec, rec_offs_comp(offsets)) ) {
 
 			continue;
 		}

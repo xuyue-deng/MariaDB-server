@@ -43,9 +43,11 @@ by crashing the database and doing a roll-forward.
 Created 10/16/1994 Heikki Tuuri
 *******************************************************/
 
+#include "btr0btr.h"
 #include "btr0cur.h"
 #include "row0upd.h"
 #include "mtr0log.h"
+#include "page0cur.h"
 #include "page0page.h"
 #include "page0zip.h"
 #include "rem0rec.h"
@@ -53,6 +55,7 @@ Created 10/16/1994 Heikki Tuuri
 #include "buf0lru.h"
 #include "btr0btr.h"
 #include "btr0sea.h"
+#include "row0ins.h"
 #include "row0log.h"
 #include "row0purge.h"
 #include "row0upd.h"
@@ -2979,15 +2982,80 @@ btr_cur_ins_lock_and_undo(
 				trx->wsrep_UK_scan= true;
 			}
 #endif /* WITH_WSREP */
-			err = lock_rec_insert_check_and_lock(
-				flags, rec, btr_cur_get_block(cursor),
-				index, thr, mtr, inherit);
+                        buf_block_t *old_block= btr_cur_get_block(cursor);
+                        ut_ad(old_block);
+                        rec_t *cur_rec= rec;
+                        buf_block_t *cur_block= old_block;
+                        ibool comp= dict_table_is_comp(index->table);
+                        bool first_rec= true;
+                        ulint latch_mode;
+                        while ((err= lock_rec_insert_check_and_lock(
+                                    flags, cur_rec, cur_block, index, thr, mtr,
+                                    inherit, first_rec)) == DB_SUCCESS ||
+                               err == DB_SUCCESS_LOCKED_REC)
+                        {
+                          first_rec= false;
+                          const rec_t *next_rec=
+                              page_rec_get_next_const(cur_rec);
+                          if (!page_rec_is_supremum(next_rec) &&
+                              !rec_get_deleted_flag(next_rec, comp))
+                            break;
+                        get_next_rec:
+                          if (!page_cur_is_after_last(
+                                  btr_cur_get_page_cur(cursor)))
+                            page_cur_move_to_next(
+                                btr_cur_get_page_cur(cursor));
+                          else
+                          {
+                            ulint next_page_no=
+                                btr_page_get_next(btr_cur_get_page(cursor));
+
+                            if (next_page_no == FIL_NULL)
+                              break;
+
+                            buf_block_t *block= btr_cur_get_block(cursor);
+                            latch_mode= mtr->have_x_latch(next_page_no)
+                                                  ? BTR_MODIFY_LEAF
+                                                  : BTR_SEARCH_LEAF;
+
+                            block= btr_block_get(
+                                page_id_t(block->page.id.space(),
+                                          next_page_no),
+                                block->page.size, latch_mode, index, mtr);
+
+                            if (cur_block != old_block)
+                              btr_leaf_page_release(btr_cur_get_block(cursor),
+                                                    latch_mode, mtr);
+                            page_cur_set_before_first(
+                                block, btr_cur_get_page_cur(cursor));
+                            page_cur_move_to_next(
+                                btr_cur_get_page_cur(cursor));
+
+                            ut_ad(!page_cur_is_after_last(
+                                btr_cur_get_page_cur(cursor)));
+                          }
+
+                          cur_rec= btr_cur_get_rec(cursor);
+                          cur_block= btr_cur_get_block(cursor);
+                          if (page_rec_is_supremum(cur_rec))
+                            goto get_next_rec;
+                        }
+                        page_cur_t *page_cur= btr_cur_get_page_cur(cursor);
+                        ut_ad(page_cur);
+                        if (cur_block != old_block)
+                        {
+                          ut_ad(latch_mode == BTR_MODIFY_LEAF ||
+                                latch_mode == BTR_SEARCH_LEAF);
+                          btr_leaf_page_release(btr_cur_get_block(cursor),
+                                                latch_mode, mtr);
+                          page_cur->block= old_block;
+                        }
+                        page_cur->rec= rec;
 #ifdef WITH_WSREP
 			trx->wsrep_UK_scan= false;
 #endif /* WITH_WSREP */
 		}
 	}
-
 	if (err != DB_SUCCESS
 	    || !(~flags | (BTR_NO_UNDO_LOG_FLAG | BTR_KEEP_SYS_FLAG))
 	    || !dict_index_is_clust(index) || dict_index_is_ibuf(index)) {

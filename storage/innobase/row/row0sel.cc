@@ -1638,6 +1638,7 @@ table_loop:
 
 	plan = sel_node_get_nth_plan(node, node->fetch_table);
 	index = plan->index;
+	ut_ad(!dict_index_is_spatial(index));
 #ifdef BTR_CUR_HASH_ADAPT
 	ulint has_search_latch = 0;
 	rw_lock_t* const latch = btr_get_search_latch(index);
@@ -1877,10 +1878,16 @@ skip_lock:
 			if (gl_dir == NONE
 					&& cursor_just_opened
 					&& !dict_index_is_spatial(index)) {
-				gl_dir = BACKWARD;
-				node->asc = !node->asc;
-				btr_pcur_store_position(&(plan->pcur), &mtr);
-				btr_pcur_copy_stored_position(&gap_lock_init_pcur, &(plan->pcur));
+				if (!node->asc) {
+					gl_dir = BACKWARD;
+					node->asc = !node->asc;
+					btr_pcur_store_position(&(plan->pcur),
+					    &mtr);
+					btr_pcur_copy_stored_position(
+					    &gap_lock_init_pcur, &(plan->pcur));
+				}
+				else
+					gl_dir = FORWARD;
 			}
 			goto next_rec;
 		} else {
@@ -5031,8 +5038,8 @@ wrong_offs:
 				 <= TRX_ISO_READ_COMMITTED)
 			    && prebuilt->select_lock_type != LOCK_NONE
 			    && !dict_index_is_spatial(index)) {
-
-				if (gl_dir == NONE || moves_up || rec_get_deleted_flag(rec, comp)) {
+				bool deleted_flag =  rec_get_deleted_flag(rec, comp);
+				if (gl_dir == NONE || moves_up || deleted_flag) {
 					/* Try to place a gap lock on the index
 					record only if innodb_locks_unsafe_for_binlog
 					option is not set or this session is not
@@ -5041,7 +5048,8 @@ wrong_offs:
 					err = sel_set_rec_lock(
 						pcur,
 						rec, index, offsets,
-						prebuilt->select_lock_type, LOCK_GAP,
+						prebuilt->select_lock_type,
+						deleted_flag ? LOCK_ORDINARY : LOCK_GAP,
 						thr, &mtr);
 
 					switch (err) {
@@ -5053,7 +5061,7 @@ wrong_offs:
 					}
 				}
 
-				if (rec_get_deleted_flag(rec, comp)) {
+				if (deleted_flag) {
 					if (gl_dir == NONE)
 						goto start_gl_dir;
 					goto next_rec;
@@ -5084,8 +5092,8 @@ wrong_offs:
 				 <= TRX_ISO_READ_COMMITTED)
 			    && prebuilt->select_lock_type != LOCK_NONE
 			    && !dict_index_is_spatial(index)) {
-
-				if (gl_dir == NONE || moves_up || rec_get_deleted_flag(rec, comp)) {
+				bool deleted_flag = rec_get_deleted_flag(rec, comp);
+				if (gl_dir == NONE || moves_up || deleted_flag) {
 					/* Try to place a gap lock on the index
 					record only if innodb_locks_unsafe_for_binlog
 					option is not set or this session is not
@@ -5094,7 +5102,8 @@ wrong_offs:
 					err = sel_set_rec_lock(
 						pcur,
 						rec, index, offsets,
-						prebuilt->select_lock_type, LOCK_GAP,
+						prebuilt->select_lock_type,
+						deleted_flag ? LOCK_ORDINARY : LOCK_GAP,
 						thr, &mtr);
 
 					switch (err) {
@@ -5106,7 +5115,7 @@ wrong_offs:
 					}
 				}
 
-				if (rec_get_deleted_flag(rec, comp)) {
+				if (deleted_flag) {
 					if (gl_dir == NONE)
 						goto start_gl_dir;
 					goto next_rec;
@@ -5438,10 +5447,14 @@ locks_ok_del_marked:
 				&& !direction
 				&& !dict_index_is_spatial(index)) {
 start_gl_dir:
-			gl_dir = BACKWARD;
-			moves_up = !moves_up;
-			btr_pcur_store_position(pcur, &mtr);
-			btr_pcur_copy_stored_position(&gap_lock_init_pcur, pcur);
+			if (!moves_up) {
+				gl_dir = BACKWARD;
+				moves_up = !moves_up;
+				btr_pcur_store_position(pcur, &mtr);
+				btr_pcur_copy_stored_position(&gap_lock_init_pcur, pcur);
+			}
+			else
+				gl_dir = FORWARD;
 		}
 
 		goto next_rec;

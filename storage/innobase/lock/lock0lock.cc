@@ -614,6 +614,29 @@ lock_rec_get_gap(
 	return(lock->type_mode & LOCK_GAP);
 }
 
+bool lock_rec_has_gap(buf_block_t *block, ulint heap_no)
+{
+  if (heap_no == PAGE_HEAP_NO_INFIMUM)
+    return false;
+
+  bool result = false;
+
+  lock_mutex_enter();
+  for (lock_t *lock= lock_rec_get_first(lock_sys->rec_hash,
+                                        block, heap_no);
+       lock != NULL; lock= lock_rec_get_next(heap_no, lock))
+    if ((heap_no == PAGE_HEAP_NO_SUPREMUM) || lock_rec_get_gap(lock) ||
+        (lock->type_mode & ~(LOCK_MODE_MASK | LOCK_TYPE_MASK)) ==
+            LOCK_ORDINARY)
+    {
+      result = true;
+      break;
+    }
+  lock_mutex_exit();
+
+  return result;
+}
+
 /*********************************************************************//**
 Gets the LOCK_REC_NOT_GAP flag of a record lock.
 @return LOCK_REC_NOT_GAP or 0 */
@@ -5630,7 +5653,8 @@ lock_rec_insert_check_and_lock(
 	dict_index_t*	index,	/*!< in: index */
 	que_thr_t*	thr,	/*!< in: query thread */
 	mtr_t*		mtr,	/*!< in/out: mini-transaction */
-	ibool*		inherit)/*!< out: set to TRUE if the new
+	ibool*		inherit,
+	bool first_rec)/*!< out: set to TRUE if the new
 				inserted record maybe should inherit
 				LOCK_GAP type locks from the successor
 				record */
@@ -5673,14 +5697,14 @@ lock_rec_insert_check_and_lock(
 
 		lock_mutex_exit();
 
-		if (inherit_in && !dict_index_is_clust(index)) {
+		if (first_rec && inherit_in && !dict_index_is_clust(index)) {
 			/* Update the page max trx id field */
 			page_update_max_trx_id(block,
 					       buf_block_get_page_zip(block),
 					       trx->id, mtr);
 		}
-
-		*inherit = FALSE;
+		if (first_rec)
+			*inherit = FALSE;
 
 		return(DB_SUCCESS);
 	}
@@ -5691,7 +5715,8 @@ lock_rec_insert_check_and_lock(
 		return(DB_SUCCESS);
 	}
 
-	*inherit = TRUE;
+	if (first_rec)
+		*inherit = TRUE;
 
 	/* If another transaction has an explicit lock request which locks
 	the gap, waiting or granted, on the successor, the insert has to wait.
@@ -5731,13 +5756,15 @@ lock_rec_insert_check_and_lock(
 		err = DB_SUCCESS;
 		/* fall through */
 	case DB_SUCCESS:
-		if (!inherit_in || dict_index_is_clust(index)) {
+		if ((first_rec && !inherit_in) || dict_index_is_clust(index)) {
 			break;
 		}
 
 		/* Update the page max trx id field */
-		page_update_max_trx_id(
-			block, buf_block_get_page_zip(block), trx->id, mtr);
+		if (first_rec)
+			page_update_max_trx_id(
+				block, buf_block_get_page_zip(block), trx->id,
+				mtr);
 	default:
 		/* We only care about the two return values. */
 		break;

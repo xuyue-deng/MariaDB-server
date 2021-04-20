@@ -65,7 +65,6 @@ insert into parent values(55);
 --echo # delete some range from child table
 --echo #
 delete from child where id between @pg and @pg + @pg_gap;
-
 delete from child where id < 100;
 --eval delete from child where id > (($max_records * 10) - 100)
 
@@ -76,15 +75,15 @@ begin;
 --echo # Delete some row from the parent table to lock gap in the child table
 --echo #
 delete from parent where a = @pg + (@pg_gap/2);
+delete from parent where a = 60;
+--eval delete from parent where a = (($max_records*10) - 40);
+
 # delete from t where a between (@pg + (@pg_gap/2) - 10) and (@pg + (@pg_gap/2) + 10);
 
 connect (con1,localhost,root,,);
 set transaction isolation level serializable;
 
 begin;
-#--eval INSERT INTO fl1 VALUES(10, 10)
-#--eval INSERT INTO fl1 VALUES(($max_records * 10) - 10, ($max_records * 10) - 10)
-
 --eval SET @pg = $pg_val
 --eval SET @pg_gap = $pg_gap
 --eval SET @pg_not_gap = $pg_not_gap
@@ -93,6 +92,10 @@ SET session innodb_lock_wait_timeout=1;
 --echo #
 --echo # Insert into locked gap
 --echo #
+--error ER_LOCK_WAIT_TIMEOUT
+insert into child values(55, 55);
+--error ER_LOCK_WAIT_TIMEOUT
+--eval insert into child values(($max_records * 10) - 55, ($max_records * 10) - 55)
 --error ER_LOCK_WAIT_TIMEOUT
 insert into child values(@pg + (@pg_gap/2) + 5, @pg + (@pg_gap/2) + 5);
 

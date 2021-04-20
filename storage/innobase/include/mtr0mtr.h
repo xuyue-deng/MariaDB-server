@@ -437,6 +437,9 @@ struct mtr_t {
 	/** Check if we are holding a block latch in exclusive mode
 	@param block  buffer pool block to search for */
 	bool have_x_latch(const buf_block_t& block) const;
+
+        bool have_x_latch(ulint page_no) const;
+
 private:
 	/** Look up the system tablespace. */
 	void lookup_sys_space();

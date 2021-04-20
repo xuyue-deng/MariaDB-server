@@ -818,6 +818,23 @@ struct FindBlockX
   }
 };
 
+/** Find out whether a block was not X-latched by the mini-transaction */
+struct FindPageNoX
+{
+  ulint page_no;
+
+  FindPageNoX(ulint page_no): page_no(page_no) {}
+
+  /** @return whether the block was not found x-latched */
+  bool operator()(const mtr_memo_slot_t *slot) const
+  {
+    return slot->type != MTR_MEMO_PAGE_X_FIX ||
+           !slot->object ||
+           ((buf_block_t *) slot->object)->page.id.page_no() != page_no;
+  }
+};
+
+
 #ifdef UNIV_DEBUG
 /** Assert that the block is not present in the mini-transaction */
 struct FindNoBlock
@@ -846,6 +863,11 @@ bool mtr_t::have_x_latch(const buf_block_t &block) const
   }
   ut_ad(rw_lock_own(&block.lock, RW_LOCK_X));
   return true;
+}
+
+bool mtr_t::have_x_latch(ulint page_no) const
+{
+  return !m_memo.for_each_block(CIterate<FindPageNoX>(FindPageNoX(page_no)));
 }
 
 #ifdef UNIV_DEBUG
