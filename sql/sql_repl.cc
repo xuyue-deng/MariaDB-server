@@ -830,6 +830,9 @@ static int send_heartbeat_event(binlog_send_info *info,
   DBUG_ENTER("send_heartbeat_event");
 
   ulong ev_offset;
+  char extra_buf[HB_EXTRA_HEADER_LEN];
+  uint8 hb_flags= 0;
+
   if (reset_transmit_packet(info, info->flags, &ev_offset, &info->errmsg))
     DBUG_RETURN(1);
 
@@ -850,18 +853,44 @@ static int send_heartbeat_event(binlog_send_info *info,
   size_t event_len = ident_len + LOG_EVENT_HEADER_LEN +
     (do_checksum ? BINLOG_CHECKSUM_LEN : 0);
   int4store(header + SERVER_ID_OFFSET, global_system_variables.server_id);
+  DBUG_EXECUTE_IF("simulate_pos_4G",
+  {
+    const_cast<event_coordinates *>(coord)->pos= (UINT32_MAX + (ulong)1);
+    DBUG_SET("-d, simulate_pos_4G");
+  };);
+  if (coord->pos <= UINT32_MAX)
+  {
+    int4store(header + LOG_POS_OFFSET, coord->pos);  // log_pos
+  }
+  else
+  {
+    /*
+      When coord->pos > UINT32_MAX, header's log_pos will overflow, hence an
+      extra_header is introduced. The extra_header has two parts. 'hb_flags'
+      to hold flags for additional fields followed by actual payload for new
+      fields.
+    */
+    int4store(header + LOG_POS_OFFSET, 0);
+    hb_flags|= HB_LONG_LOG_POS_OFFSET_F;
+    *((uint8*)(extra_buf))= hb_flags;
+    int8store(extra_buf + HB_LONG_LOG_POS_OFFSET, coord->pos);
+    event_len+= HB_EXTRA_HEADER_LEN;
+  }
+
   int4store(header + EVENT_LEN_OFFSET, event_len);
   int2store(header + FLAGS_OFFSET, 0);
 
-  int4store(header + LOG_POS_OFFSET, coord->pos);  // log_pos
-
   packet->append(header, sizeof(header));
-  packet->append(p, ident_len);             // log_file_name
+  if (hb_flags & HB_LONG_LOG_POS_OFFSET_F)
+    packet->append(extra_buf, sizeof(extra_buf));
+  packet->append(p, ident_len);                    // log_file_name
 
   if (do_checksum)
   {
     char b[BINLOG_CHECKSUM_LEN];
     ha_checksum crc= my_checksum(0, (uchar*) header, sizeof(header));
+    if (hb_flags & HB_LONG_LOG_POS_OFFSET_F)
+      crc= my_checksum(crc, (uchar*) extra_buf, sizeof(extra_buf));
     crc= my_checksum(crc, (uchar*) p, ident_len);
     int4store(b, crc);
     packet->append(b, sizeof(b));
