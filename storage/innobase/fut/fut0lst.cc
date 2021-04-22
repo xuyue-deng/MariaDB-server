@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 1995, 2016, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2019, 2020, MariaDB Corporation.
+Copyright (c) 2019, 2021, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -151,7 +151,8 @@ static void flst_insert_after(buf_block_t *base, uint16_t boffset,
   {
     buf_block_t *block;
     flst_node_t *next= fut_get_ptr(add->page.id().space(), add->zip_size(),
-                                   next_addr, RW_SX_LATCH, mtr, &block);
+                                   next_addr, RW_SX_LATCH, BUF_GET, mtr,
+                                   &block);
     flst_write_addr(*block, next + FLST_PREV,
                     add->page.id().page_no(), aoffset, mtr);
   }
@@ -202,7 +203,8 @@ static void flst_insert_before(buf_block_t *base, uint16_t boffset,
   {
     buf_block_t *block;
     flst_node_t *prev= fut_get_ptr(add->page.id().space(), add->zip_size(),
-                                   prev_addr, RW_SX_LATCH, mtr, &block);
+                                   prev_addr, RW_SX_LATCH, BUF_GET, mtr,
+                                   &block);
     flst_write_addr(*block, prev + FLST_NEXT,
                     add->page.id().page_no(), aoffset, mtr);
   }
@@ -253,7 +255,7 @@ void flst_add_last(buf_block_t *base, uint16_t boffset,
     const flst_node_t *c= addr.page == add->page.id().page_no()
       ? add->frame + addr.boffset
       : fut_get_ptr(add->page.id().space(), add->zip_size(), addr,
-                    RW_SX_LATCH, mtr, &cur);
+                    RW_SX_LATCH, BUF_GET, mtr, &cur);
     flst_insert_after(base, boffset, cur,
                       static_cast<uint16_t>(c - cur->frame),
                       add, aoffset, mtr);
@@ -286,7 +288,7 @@ void flst_add_first(buf_block_t *base, uint16_t boffset,
     const flst_node_t *c= addr.page == add->page.id().page_no()
       ? add->frame + addr.boffset
       : fut_get_ptr(add->page.id().space(), add->zip_size(), addr,
-                    RW_SX_LATCH, mtr, &cur);
+                    RW_SX_LATCH, BUF_GET, mtr, &cur);
     flst_insert_before(base, boffset, cur,
                        static_cast<uint16_t>(c - cur->frame),
                        add, aoffset, mtr);
@@ -321,9 +323,10 @@ void flst_remove(buf_block_t *base, uint16_t boffset,
     flst_node_t *prev= prev_addr.page == cur->page.id().page_no()
       ? cur->frame + prev_addr.boffset
       : fut_get_ptr(cur->page.id().space(), cur->zip_size(), prev_addr,
-                    RW_SX_LATCH, mtr, &block);
-    flst_write_addr(*block, prev + FLST_NEXT,
-                    next_addr.page, next_addr.boffset, mtr);
+                    RW_SX_LATCH, BUF_GET_POSSIBLY_FREED, mtr, &block);
+    if (prev)
+      flst_write_addr(*block, prev + FLST_NEXT,
+                      next_addr.page, next_addr.boffset, mtr);
   }
 
   if (next_addr.page == FIL_NULL)
@@ -335,9 +338,10 @@ void flst_remove(buf_block_t *base, uint16_t boffset,
     flst_node_t *next= next_addr.page == cur->page.id().page_no()
       ? cur->frame + next_addr.boffset
       : fut_get_ptr(cur->page.id().space(), cur->zip_size(), next_addr,
-                    RW_SX_LATCH, mtr, &block);
-    flst_write_addr(*block, next + FLST_PREV,
-                    prev_addr.page, prev_addr.boffset, mtr);
+                    RW_SX_LATCH, BUF_GET_POSSIBLY_FREED, mtr, &block);
+    if (next)
+      flst_write_addr(*block, next + FLST_PREV,
+                      prev_addr.page, prev_addr.boffset, mtr);
   }
 
   byte *len= &base->frame[boffset + FLST_LEN];
@@ -368,7 +372,7 @@ void flst_validate(const buf_block_t *base, uint16_t boffset, mtr_t *mtr)
     mtr2.start();
     const flst_node_t *node= fut_get_ptr(base->page.id().space(),
                                          base->zip_size(), addr,
-                                         RW_SX_LATCH, &mtr2);
+                                         RW_SX_LATCH, BUF_GET, &mtr2);
     addr= flst_get_next_addr(node);
     mtr2.commit();
   }
@@ -382,7 +386,7 @@ void flst_validate(const buf_block_t *base, uint16_t boffset, mtr_t *mtr)
     mtr2.start();
     const flst_node_t *node= fut_get_ptr(base->page.id().space(),
                                          base->zip_size(), addr,
-                                         RW_SX_LATCH, &mtr2);
+                                         RW_SX_LATCH, BUF_GET, &mtr2);
     addr= flst_get_prev_addr(node);
     mtr2.commit();
   }

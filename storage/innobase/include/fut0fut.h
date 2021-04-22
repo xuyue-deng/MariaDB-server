@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 1995, 2016, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2019, MariaDB Corporation.
+Copyright (c) 2019, 2021, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -35,6 +35,7 @@ Created 12/13/1995 Heikki Tuuri
 @param[in]	zip_size	ROW_FORMAT=COMPRESSED page size, or 0
 @param[in]	addr		file address
 @param[in]	rw_latch	RW_S_LATCH, RW_X_LATCH, RW_SX_LATCH
+@param[in]	mode		BUF_GET or BUF_GET_POSSIBLY_FREED
 @param[out]	ptr_block	file page
 @param[in,out]	mtr		mini-transaction
 @return pointer to a byte in (*ptr_block)->frame; the *ptr_block is
@@ -46,6 +47,7 @@ fut_get_ptr(
 	ulint			zip_size,
 	fil_addr_t		addr,
 	rw_lock_type_t		rw_latch,
+	ulint			mode,
 	mtr_t*			mtr,
 	buf_block_t**		ptr_block = NULL)
 {
@@ -57,10 +59,15 @@ fut_get_ptr(
 	      || (rw_latch == RW_X_LATCH)
 	      || (rw_latch == RW_SX_LATCH));
 
-	block = buf_page_get(page_id_t(space, addr.page), zip_size,
-			     rw_latch, mtr);
-
-	ptr = buf_block_get_frame(block) + addr.boffset;
+	block = buf_page_get_gen(page_id_t(space, addr.page), zip_size,
+				 rw_latch, nullptr, mode, mtr);
+	if (!block) {
+	} else if (mode == BUF_GET_POSSIBLY_FREED
+		   && block->page.status == buf_page_t::FREED) {
+		block = nullptr;
+	} else {
+		ptr = buf_block_get_frame(block) + addr.boffset;
+	}
 
 	if (ptr_block != NULL) {
 		*ptr_block = block;
