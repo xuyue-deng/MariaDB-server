@@ -167,6 +167,11 @@ enum enum_ddl_log_alter_table_phase {
 #define DDL_LOG_FLAG_ALTER_ENGINE_CHANGED (1 << 1)
 #define DDL_LOG_FLAG_ONLY_FRM             (1 << 2)
 #define DDL_LOG_FLAG_UPDATE_STAT          (1 << 3)
+/*
+  Set when using ALTER TABLE on a partitioned table and the table
+  engine is not changed
+*/
+#define DDL_LOG_FLAG_ALTER_PARTITION      (1 << 4)
 
 /*
   Setting ddl_log_entry.phase to this has the same effect as setting
@@ -319,6 +324,7 @@ bool ddl_log_alter_table(THD *thd, DDL_LOG_STATE *ddl_state,
                          handlerton *org_hton,
                          const LEX_CSTRING *db, const LEX_CSTRING *table,
                          handlerton *new_hton,
+                         handlerton *partition_underlying_hton,
                          const LEX_CSTRING *new_db,
                          const LEX_CSTRING *new_table,
                          const LEX_CSTRING *frm_path,

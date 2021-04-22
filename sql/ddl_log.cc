@@ -1904,7 +1904,7 @@ static int ddl_log_execute_action(THD *thd, MEM_ROOT *mem_root,
   }
   case DDL_LOG_ALTER_TABLE_ACTION:
   {
-    handlerton *org_hton;
+    handlerton *org_hton, *partition_underlying_hton;
     handler *org_file;
     bool is_renamed= ddl_log_entry->flags & DDL_LOG_FLAG_ALTER_RENAME;
     bool new_version_ready __attribute__((unused))= 0;
@@ -1912,13 +1912,25 @@ static int ddl_log_execute_action(THD *thd, MEM_ROOT *mem_root,
     db=     ddl_log_entry->db;
     table=  ddl_log_entry->name;
 
-    my_debug_put_break_here();
     if (!(org_file= create_handler(thd, mem_root,
                                    &ddl_log_entry->from_handler_name)))
       goto end;
     /* Handlerton of the final table and any temporary tables */
     org_hton= org_file->ht;
+    /*
+      partition_underlying_hton is the hton for the new file, or
+      in case of ALTER of a partitioned table, the underlying
+      table
+    */
+    partition_underlying_hton= hton;
 
+    if (ddl_log_entry->flags & DDL_LOG_FLAG_ALTER_PARTITION)
+    {
+      /*
+        The from and to tables where both using the partition engine.
+      */
+      hton= org_hton;
+    }
     switch (ddl_log_entry->phase) {
     case DDL_ALTER_TABLE_PHASE_RENAME_FAILED:
       /*
@@ -1970,9 +1982,10 @@ static int ddl_log_execute_action(THD *thd, MEM_ROOT *mem_root,
           If new version, replace the old .frm with the new one.
         */
         to_path[to_length - reg_ext_length]= 0;  // Remove .frm
-        if (!hton->check_version || new_version_ready ||
-            !hton->check_version(hton, to_path, &version,
-                                 ddl_log_entry->unique_id))
+        if (!partition_underlying_hton->check_version || new_version_ready ||
+            !partition_underlying_hton->check_version(partition_underlying_hton,
+                                                      to_path, &version,
+                                                      ddl_log_entry->unique_id))
         {
           /* Table is up to date */
 
@@ -3297,6 +3310,7 @@ bool ddl_log_alter_table(THD *thd, DDL_LOG_STATE *ddl_state,
                          handlerton *org_hton,
                          const LEX_CSTRING *db, const LEX_CSTRING *table,
                          handlerton *new_hton,
+                         handlerton *partition_underlying_hton,
                          const LEX_CSTRING *new_db,
                          const LEX_CSTRING *new_table,
                          const LEX_CSTRING *frm_path,
@@ -3328,6 +3342,16 @@ bool ddl_log_alter_table(THD *thd, DDL_LOG_STATE *ddl_state,
   ddl_log_entry.flags=        is_renamed ? DDL_LOG_FLAG_ALTER_RENAME : 0;
   ddl_log_entry.unique_id=    table_version;
 
+  /*
+    If we are doing an inplace of a partition engine, we need to log the
+    underlaying engine. We store this is in ddl_log_entry.handler_name
+  */
+  if (new_hton == org_hton && partition_underlying_hton != new_hton)
+  {
+    lex_string_set(&ddl_log_entry.handler_name,
+                   ha_resolve_storage_engine_name(partition_underlying_hton));
+    ddl_log_entry.flags|= DDL_LOG_FLAG_ALTER_PARTITION;
+  }
   DBUG_ASSERT(version->length == MY_UUID_SIZE);
   memcpy(ddl_log_entry.uuid, version->str, version->length);
   DBUG_RETURN(ddl_log_write(ddl_state, &ddl_log_entry));
