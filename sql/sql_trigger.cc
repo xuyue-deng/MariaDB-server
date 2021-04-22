@@ -679,7 +679,7 @@ end:
     ddl_log.org_table=        thd->lex->spname->m_name;
     backup_log_ddl(&ddl_log);
   }
-  ddl_log_complete(&ddl_log_state);
+  ddl_log_state.complete(thd);
   debug_crash_here("ddl_log_drop_before_delete_tmp");
   /* delete any created log files */
   ddl_log_revert(thd, &ddl_log_state_tmp_file);
@@ -1072,7 +1072,7 @@ err:
   /* Recover the old .TRN and .TRG files & delete backup files */
   ddl_log_revert(thd, ddl_log_state);
   /* All backup files are now deleted */
-  ddl_log_complete(ddl_log_state_tmp_file);
+  ddl_log_state_tmp_file->complete(thd);
   DBUG_RETURN(true);
 }
 

@@ -1121,7 +1121,7 @@ mysql_rm_db_internal(THD *thd, const LEX_CSTRING *db, bool if_exists,
   thd->push_internal_handler(&err_handler);
   if (!thd->killed &&
       !(tables &&
-        mysql_rm_table_no_locks(thd, tables, &rm_db, &ddl_log_state, true, false,
+        mysql_rm_table_no_locks(thd, tables, &rm_db, &ddl_log_state, NULL, true, false,
                                 true, false, true, false)))
   {
     debug_crash_here("ddl_log_drop_after_drop_tables");
@@ -1145,7 +1145,7 @@ mysql_rm_db_internal(THD *thd, const LEX_CSTRING *db, bool if_exists,
       thd->pop_internal_handler();
       my_error(EE_DELETE, MYF(0), path, my_errno);
       error= true;
-      ddl_log_complete(&ddl_log_state);
+      ddl_log_state.complete(thd);
       goto end;
     }
     del_dbopt(path);				// Remove dboption hash entry
@@ -1281,7 +1281,7 @@ update_binlog:
   }
 
 exit:
-  ddl_log_complete(&ddl_log_state);
+  ddl_log_state.complete(thd);
   /*
     If this database was the client's selected database, we silently
     change the client's selected database to nothing (to have an empty

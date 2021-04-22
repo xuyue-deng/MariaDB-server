@@ -1039,7 +1039,7 @@ bool mysql_rm_table(THD *thd,TABLE_LIST *tables, bool if_exists,
 
   /* mark for close and remove all cached entries */
   thd->push_internal_handler(&err_handler);
-  error= mysql_rm_table_no_locks(thd, tables, &thd->db, (DDL_LOG_STATE*) 0,
+  error= mysql_rm_table_no_locks(thd, tables, &thd->db, (DDL_LOG_STATE*) 0, NULL,
                                  if_exists,
                                  drop_temporary,
                                  false, drop_sequence, dont_log_query,
@@ -1099,6 +1099,78 @@ static uint32 get_comment(THD *thd, uint32 comment_pos,
 }
 
 /**
+  Make user-friendly backup name and MDL-lock it exclusively. The backup name
+  consists of original name + $ suffix. If there is already a lock or existing
+  table, the suffix is incremented until there is free name slot.
+
+  Backup name consists of:
+
+    TMP_PREFIX TABLE_NAME_CUT $ [UNIQ]
+
+  Where:
+
+  TMP_PREFIX      Prefix of temporary name (#sql)
+  TABLE_NAME_CUT  Table name trimmed to NAME_LEN - 8 characters;
+  $               A dollar sign;
+  [UNIQ]          Uniqueness marker: 0 to 3 digits number for uniqueness.
+
+  @param  orig    Original table name
+  @param  res     Resulting table name
+
+  @retval  false  Success
+  @retval  true   Error
+*/
+
+static
+bool find_backup_name(THD *thd, TABLE_LIST *orig, TABLE_LIST *res)
+{
+  char res_name[NAME_LEN + 1];
+  static const LEX_CSTRING pre= { tmp_file_prefix "b-", strlen(tmp_file_prefix) + 2 };
+  static const size_t name_trim= NAME_LEN - pre.length - 1 - 3;
+  strcpy(res_name, pre.str);
+  strncpy(res_name + pre.length, orig->table_name.str, name_trim);
+  size_t len= std::min(name_trim, orig->table_name.length + pre.length);
+  bzero(res_name + len, NAME_LEN - len + 1);
+  LEX_CSTRING n= { res_name, len };
+  for (int i= 0; i < 1000; ++i)
+  {
+    DBUG_ASSERT(strlen(res_name) == n.length);
+    if (!thd->mdl_context.is_lock_owner(MDL_key::TABLE, orig->db.str, res_name,
+                                        MDL_SHARED))
+    {
+      res->init_one_table(&orig->db, &n, &n, TL_WRITE);
+      if (thd->mdl_context.try_acquire_lock(&res->mdl_request))
+        return true;
+      if (res->mdl_request.ticket)
+      {
+        if (!ha_table_exists(thd, &res->db, &n))
+          break;
+        thd->mdl_context.set_lock_duration(res->mdl_request.ticket, MDL_EXPLICIT);
+        thd->mdl_context.release_lock(res->mdl_request.ticket);
+      }
+    }
+    n.length= sprintf(res_name + len, "-%d", i);
+    if (n.length < 1)
+      return true;
+    n.length+= len;
+  }
+  if (!res->mdl_request.ticket)
+    return true;
+  if (thd->mdl_context.upgrade_shared_lock(res->mdl_request.ticket, MDL_EXCLUSIVE,
+                                           thd->variables.lock_wait_timeout))
+    return true;
+  res->table_name.str= strmake_root(thd->mem_root,
+                                    LEX_STRING_WITH_LEN(res->table_name));
+  if (!res->table_name.str)
+  {
+    my_error(ER_OUT_OF_RESOURCES, MYF(0));
+    return true;
+  }
+  res->alias.str= res->table_name.str;
+  return false;
+}
+
+/**
   Execute the drop of a sequence, view or table (normal or temporary).
 
   @param  thd             Thread handler
@@ -1139,6 +1211,7 @@ static uint32 get_comment(THD *thd, uint32 comment_pos,
 int mysql_rm_table_no_locks(THD *thd, TABLE_LIST *tables,
                             const LEX_CSTRING *current_db,
                             DDL_LOG_STATE *ddl_log_state,
+                            DDL_LOG_STATE *ddl_log_state_rename,
                             bool if_exists,
                             bool drop_temporary, bool drop_view,
                             bool drop_sequence,
@@ -1160,6 +1233,7 @@ int mysql_rm_table_no_locks(THD *thd, TABLE_LIST *tables,
   bool trans_tmp_table_deleted= 0, non_trans_tmp_table_deleted= 0;
   bool is_drop_tmp_if_exists_added= 0, non_tmp_table_deleted= 0;
   bool log_if_exists= if_exists;
+  bool force_if_exists;
   const LEX_CSTRING *object_to_drop= ((drop_sequence) ?
                                       &SEQUENCE_clex_str :
                                       &TABLE_clex_str);
@@ -1169,6 +1243,7 @@ int mysql_rm_table_no_locks(THD *thd, TABLE_LIST *tables,
 
   if (!ddl_log_state)
   {
+    DBUG_ASSERT(!ddl_log_state_rename);
     ddl_log_state= &local_ddl_log_state;
     bzero(ddl_log_state, sizeof(*ddl_log_state));
   }
@@ -1236,7 +1311,7 @@ int mysql_rm_table_no_locks(THD *thd, TABLE_LIST *tables,
     bool is_temporary= 0;
     bool was_view= 0, was_table= 0;
     const LEX_CSTRING db= table->db;
-    const LEX_CSTRING table_name= table->table_name;
+    LEX_CSTRING table_name= table->table_name;
     LEX_CSTRING cpath= {0,0};
     handlerton *hton= 0;
     Table_type table_type;
@@ -1348,6 +1423,36 @@ int mysql_rm_table_no_locks(THD *thd, TABLE_LIST *tables,
     }
     else if (!drop_temporary)
     {
+      if (ddl_log_state_rename)
+      {
+        rename_param param;
+        TABLE_LIST t;
+
+        if (find_backup_name(thd, table, &t))
+        {
+          error= 1;
+          goto err;
+        }
+
+        if (!mysql_check_rename(thd, &param, table, &table->db, &t.table_name,
+                                &t.table_name, if_exists) &&
+            !mysql_do_rename(thd, &param, ddl_log_state_rename, table, &table->db,
+                             false, &force_if_exists))
+        {
+          table_name= t.table_name;
+          if (!first_table)
+          {
+            /*
+              NOTE: write renamed table name into drop-chain and replay it after
+              CREATE OR REPLACE finishes. We need to finalize rename-chain first,
+              so replay would not execute it.
+            */
+            ddl_log_state->revert= true;
+            dont_log_query= true;
+          }
+        }
+      }
+
       non_temp_tables_count++;
 
       DBUG_ASSERT(thd->mdl_context.is_lock_owner(MDL_key::TABLE, db.str,
@@ -1363,6 +1468,7 @@ int mysql_rm_table_no_locks(THD *thd, TABLE_LIST *tables,
     DEBUG_SYNC(thd, "rm_table_no_locks_before_delete_table");
     if (drop_temporary)
     {
+      DBUG_ASSERT(!ddl_log_state_rename);
       /* "DROP TEMPORARY" but a temporary table was not found */
       unknown_tables.append(&db);
       unknown_tables.append('.');
@@ -1396,6 +1502,17 @@ int mysql_rm_table_no_locks(THD *thd, TABLE_LIST *tables,
     if (!first_table++)
     {
       LEX_CSTRING comment= {comment_start, (size_t) comment_len};
+
+      if (ddl_log_state_rename)
+      {
+        if (ddl_log_state->set_master(ddl_log_state_rename))
+        {
+          error= 1;
+          goto err;
+        }
+        ddl_log_state->skip_binlog= true;
+      }
+
       if (ddl_log_drop_table_init(thd, ddl_log_state, current_db, &comment))
       {
         error= 1;
@@ -1412,6 +1529,7 @@ int mysql_rm_table_no_locks(THD *thd, TABLE_LIST *tables,
           . "DROP TABLE" statement, but it's a view.
           . "DROP SEQUENCE", but it's not a sequence
       */
+      DBUG_ASSERT(!ddl_log_state_rename);
       wrong_drop_sequence= drop_sequence && hton;
       was_table|= wrong_drop_sequence;
       local_non_tmp_error= 1;
@@ -1431,14 +1549,17 @@ int mysql_rm_table_no_locks(THD *thd, TABLE_LIST *tables,
       if (thd->locked_tables_mode == LTM_LOCK_TABLES ||
           thd->locked_tables_mode == LTM_PRELOCKED_UNDER_LOCK_TABLES)
       {
-        if (wait_while_table_is_used(thd, table->table, HA_EXTRA_NOT_USED))
+        if (table->table)
         {
-          error= -1;
-          goto err;
+          if (wait_while_table_is_used(thd, table->table, HA_EXTRA_NOT_USED))
+          {
+            error= -1;
+            goto err;
+          }
+          close_all_tables_for_name(thd, table->table->s,
+                                    HA_EXTRA_PREPARE_FOR_DROP, NULL);
+          table->table= 0;
         }
-        close_all_tables_for_name(thd, table->table->s,
-                                  HA_EXTRA_PREPARE_FOR_DROP, NULL);
-        table->table= 0;
       }
       else
         tdc_remove_table(thd, db.str, table_name.str);
@@ -1468,6 +1589,9 @@ int mysql_rm_table_no_locks(THD *thd, TABLE_LIST *tables,
       }
 
       debug_crash_here("ddl_log_drop_before_delete_table");
+      if (ddl_log_state_rename)
+        goto report_error;
+
       error= ha_delete_table(thd, hton, path, &db, &table_name,
                              enoent_warning);
       debug_crash_here("ddl_log_drop_after_delete_table");
@@ -1663,7 +1787,7 @@ report_error:
         backup_log_ddl(&ddl_log);
       }
     }
-    if (!was_view)
+    if (!was_view && !ddl_log_state_rename)
       ddl_log_update_phase(ddl_log_state, DDL_DROP_PHASE_COLLECT);
 
     if (!dont_log_query &&
@@ -1782,7 +1906,7 @@ err:
     }
   }
   if (ddl_log_state == &local_ddl_log_state)
-    ddl_log_complete(ddl_log_state);
+    ddl_log_state->complete(thd);
 
   if (!drop_temporary)
   {
@@ -4160,7 +4284,6 @@ int create_table_impl(THD *thd,
   if (create_info->tmp_table())
   {
     ddl_log_state_create= 0;
-    ddl_log_state_rm= 0;
   }
 
   if (fix_constraints_names(thd, &alter_info->check_constraint_list,
@@ -4277,7 +4400,7 @@ int create_table_impl(THD *thd,
         (void) trans_rollback_stmt(thd);
         /* Remove normal table without logging. Keep tables locked */
         if (mysql_rm_table_no_locks(thd, &table_list, &thd->db,
-                                    ddl_log_state_rm,
+                                    ddl_log_state_rm, ddl_log_state_create,
                                     0, 0, 0, 0, 1, 1))
           goto err;
 
@@ -4448,12 +4571,6 @@ int create_table_impl(THD *thd,
 
   error= 0;
 err:
-  if (unlikely(error) && ddl_log_state_create)
-  {
-    /* Table was never created, so we can ignore the ddl log entry */
-    ddl_log_complete(ddl_log_state_create);
-  }
-
   THD_STAGE_INFO(thd, stage_after_create);
   delete file;
   DBUG_PRINT("exit", ("return: %d", error));
@@ -4534,7 +4651,7 @@ int mysql_create_table_no_lock(THD *thd,
       DBUG_ASSERT(thd->is_error());
       /* Drop the table as it wasn't completely done */
       if (!mysql_rm_table_no_locks(thd, table_list, &thd->db,
-                                   (DDL_LOG_STATE*) 0,
+                                   (DDL_LOG_STATE*) 0, NULL,
                                    1,
                                    create_info->tmp_table(),
                                    false, true /* Sequence*/,
@@ -4701,8 +4818,6 @@ err:
     }
     thd->binlog_xid= thd->query_id;
     ddl_log_update_xid(&ddl_log_state_create, thd->binlog_xid);
-    if (ddl_log_state_rm.is_active())
-      ddl_log_update_xid(&ddl_log_state_rm, thd->binlog_xid);
     debug_crash_here("ddl_log_create_before_binlog");
     if (unlikely(write_bin_log(thd, result ? FALSE : TRUE, thd->query(),
                                thd->query_length(), is_trans)))
@@ -4723,8 +4838,13 @@ err:
       backup_log_ddl(&ddl_log);
     }
   }
-  ddl_log_complete(&ddl_log_state_rm);
-  ddl_log_complete(&ddl_log_state_create);
+  if (result)
+  {
+    ddl_log_state_create.revert= true;
+    ddl_log_state_rm.revert= false;
+  }
+  ddl_log_state_create.complete(thd);
+  ddl_log_state_rm.complete(thd);
   DBUG_RETURN(result);
 }
 
@@ -5343,9 +5463,7 @@ err:
   {
     thd->binlog_xid= thd->query_id;
     ddl_log_update_xid(&ddl_log_state_create, thd->binlog_xid);
-    if (ddl_log_state_rm.is_active())
-      ddl_log_update_xid(&ddl_log_state_rm, thd->binlog_xid);
-    debug_crash_here("ddl_log_create_before_binlog");      
+    debug_crash_here("ddl_log_create_before_binlog");
     if (res && create_info->table_was_deleted)
     {
       /*
@@ -5381,8 +5499,13 @@ err:
     backup_log_ddl(&ddl_log);
   }
 
-  ddl_log_complete(&ddl_log_state_rm);
-  ddl_log_complete(&ddl_log_state_create);
+  if (res)
+  {
+    ddl_log_state_create.revert= true;
+    ddl_log_state_rm.revert= false;
+  }
+  ddl_log_state_create.complete(thd);
+  ddl_log_state_rm.complete(thd);
   DBUG_RETURN(res != 0);
 }
 
@@ -9093,7 +9216,7 @@ simple_rename_or_index_change(THD *thd, TABLE_LIST *table_list,
     if (likely(!error))
       my_ok(thd);
   }
-  ddl_log_complete(&ddl_log_state);
+  ddl_log_state.complete(thd);
   table_list->table= NULL;                    // For query cache
   query_cache_invalidate3(thd, table_list, 0);
 
@@ -10596,7 +10719,7 @@ end_inplace:
     We have to close the ddl log as soon as possible, after binlogging the
     query, for inplace alter table.
   */
-  ddl_log_complete(&ddl_log_state);
+  ddl_log_state.complete(thd);
   if (inplace_alter_table_committed)
   {
     /* Signal to storage engine that ddl log is committed */
@@ -10677,7 +10800,7 @@ err_new_table_cleanup:
 
 err_cleanup:
   my_free(const_cast<uchar*>(frm.str));
-  ddl_log_complete(&ddl_log_state);
+  ddl_log_state.complete(thd);
   if (inplace_alter_table_committed)
   {
     /* Signal to storage engine that ddl log is committed */
@@ -10699,7 +10822,7 @@ err_with_mdl_after_alter:
     write_bin_log_with_if_exists(thd, FALSE, FALSE, log_if_exists);
 
 err_with_mdl:
-  ddl_log_complete(&ddl_log_state);
+  ddl_log_state.complete(thd);
   /*
     An error happened while we were holding exclusive name metadata lock
     on table being altered. To be safe under LOCK TABLES we should

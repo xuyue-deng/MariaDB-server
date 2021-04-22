@@ -90,7 +90,8 @@ const char *ddl_log_action_name[DDL_LOG_LAST_ACTION]=
   "rename table", "rename view",
   "initialize drop table", "drop table",
   "drop view", "drop trigger", "drop db", "create table", "create view",
-  "delete tmp file", "create trigger", "alter table", "store query"
+  "delete tmp file", "create trigger", "alter table", "store query",
+  "execute action"
 };
 
 /* Number of phases per entry */
@@ -101,7 +102,7 @@ const uchar ddl_log_entry_phases[DDL_LOG_LAST_ACTION]=
   (uchar) DDL_DROP_PHASE_END, 1, 1,
   (uchar) DDL_DROP_DB_PHASE_END, (uchar) DDL_CREATE_TABLE_PHASE_END,
   (uchar) DDL_CREATE_VIEW_PHASE_END, 0, (uchar) DDL_CREATE_TRIGGER_PHASE_END,
-  DDL_ALTER_TABLE_PHASE_END, 1
+  DDL_ALTER_TABLE_PHASE_END, 1, 0
 };
 
 
@@ -138,6 +139,8 @@ static st_global_ddl_log global_ddl_log;
 static st_ddl_recovery   recovery_state;
 
 mysql_mutex_t LOCK_gdl;
+
+static bool ddl_log_execute_entry_no_lock(THD *thd, uint first_entry);
 
 /* Positions to different data in a ddl log block */
 #define DDL_LOG_ENTRY_TYPE_POS 0
@@ -986,7 +989,8 @@ static bool ddl_log_drop_to_binary_log(THD *thd, DDL_LOG_ENTRY *ddl_log_entry,
                                   String *query)
 {
   DBUG_ENTER("ddl_log_drop_to_binary_log");
-  if (mysql_bin_log.is_open())
+  if (!(ddl_log_entry->flags & DDL_LOG_FLAG_SKIP_BINLOG) &&
+      mysql_bin_log.is_open())
   {
     if (!ddl_log_entry->next_entry ||
         query->length() + end_comment.length + NAME_LEN + 100 >
@@ -1536,6 +1540,11 @@ static int ddl_log_execute_action(THD *thd, MEM_ROOT *mem_root,
         break;
       /* fall through */
     case DDL_DROP_PHASE_COLLECT:
+      if (ddl_log_entry->flags & DDL_LOG_FLAG_DROP_SKIP_BINLOG)
+      {
+        (void) increment_phase(entry_pos);
+        break;
+      }
       if (strcmp(recovery_state.current_db, db.str))
       {
         append_identifier(thd, &recovery_state.drop_table, &db);
@@ -1726,31 +1735,6 @@ static int ddl_log_execute_action(THD *thd, MEM_ROOT *mem_root,
     }
     strxnmov(to_path, sizeof(to_path)-1, path.str, reg_ext, NullS);
     mysql_file_delete(key_file_frm, to_path, MYF(MY_WME|MY_IGNORE_ENOENT));
-    if (ddl_log_entry->phase == DDL_CREATE_TABLE_PHASE_LOG)
-    {
-      /*
-        The server logged CREATE TABLE ... SELECT into binary log
-        before crashing. As the commit failed and we have delete the
-        table above, we have now to log the DROP of the created table.
-      */
-
-      String *query= &recovery_state.drop_table;
-      query->length(0);
-      query->append(STRING_WITH_LEN("DROP TABLE IF EXISTS "));
-      append_identifier(thd, query, &db);
-      query->append('.');
-      append_identifier(thd, query, &table);
-      query->append(&end_comment);
-
-      if (mysql_bin_log.is_open())
-      {
-        mysql_mutex_unlock(&LOCK_gdl);
-        (void) thd->binlog_query(THD::STMT_QUERY_TYPE,
-                                 query->ptr(), query->length(),
-                                 TRUE, FALSE, FALSE, 0);
-        mysql_mutex_lock(&LOCK_gdl);
-      }
-    }
     (void) update_phase(entry_pos, DDL_LOG_FINAL_PHASE);
     error= 0;
     break;
@@ -2224,6 +2208,54 @@ static int ddl_log_execute_action(THD *thd, MEM_ROOT *mem_root,
     recovery_state.query.qs_append(&ddl_log_entry->extra_name);
     break;
   }
+  case DDL_LOG_EXECUTE_ACTION:
+  {
+    DBUG_ASSERT(ddl_log_entry->unique_id <= UINT_MAX32);
+    DBUG_ASSERT(ddl_log_entry->unique_id);
+    uint execute_pos= (uint) ddl_log_entry->unique_id;
+    if (is_execute_entry_active(execute_pos))
+    {
+      DDL_LOG_ENTRY execute_entry;
+      if (read_ddl_log_entry(execute_pos, &execute_entry))
+      {
+        error= 1;
+        my_printf_error(ER_INTERNAL_ERROR,
+                        "DDL log: failed to read execute action %u", MYF(0),
+                        execute_pos);
+        break;
+      }
+      DBUG_ASSERT(execute_entry.entry_pos == execute_pos);
+      DBUG_ASSERT(execute_entry.entry_type == DDL_LOG_EXECUTE_CODE);
+      if (execute_entry.entry_type != DDL_LOG_EXECUTE_CODE)
+      {
+        error= 1;
+        my_printf_error(ER_INTERNAL_ERROR,
+                        "DDL log: unexpected execute entry type %u", MYF(0),
+                        (uint) execute_entry.entry_type);
+        (void) update_phase(entry_pos, DDL_LOG_FINAL_PHASE);
+        break;
+      }
+      ddl_log_update_recovery(execute_pos, execute_entry.xid);
+      if (ddl_log_execute_entry_no_lock(thd, execute_entry.next_entry))
+      {
+        error= 1;
+        my_printf_error(ER_INTERNAL_ERROR,
+                        "DDL log: failed to execute action %u", MYF(0),
+                        execute_pos);
+        (void) update_phase(entry_pos, DDL_LOG_FINAL_PHASE);
+        break;
+      }
+      if (disable_execute_entry(execute_pos))
+      {
+        error= 1;
+        my_printf_error(ER_INTERNAL_ERROR,
+                        "DDL log: failed disable execute action %u", MYF(0),
+                        execute_pos);
+      }
+    }
+    (void) update_phase(entry_pos, DDL_LOG_FINAL_PHASE);
+    break;
+  }
   default:
     DBUG_ASSERT(0);
     break;
@@ -2635,6 +2667,13 @@ bool ddl_log_close_binlogged_events(HASH *xids)
 }
 
 
+void ddl_log_update_recovery(uint entry_pos, ulonglong xid)
+{
+  recovery_state.execute_entry_pos= entry_pos;
+  recovery_state.xid= xid;
+}
+
+
 /**
   Execute the ddl log at recovery of MySQL Server.
 
@@ -2685,11 +2724,10 @@ int ddl_log_execute_recovery()
     if (ddl_log_entry.entry_type == DDL_LOG_EXECUTE_CODE)
     {
       /*
-        Remeber information about executive ddl log entry,
+        Remember information about executive ddl log entry,
         used for binary logging during recovery
       */
-      recovery_state.execute_entry_pos= i;
-      recovery_state.xid= ddl_log_entry.xid;
+      ddl_log_update_recovery(i, ddl_log_entry.xid);
 
       /* purecov: begin tested */
       if (ddl_log_entry.unique_id > DDL_LOG_MAX_RETRY)
@@ -2713,6 +2751,7 @@ int ddl_log_execute_recovery()
         error= -1;
         continue;
       }
+      (void) disable_execute_entry(i);
       count++;
     }
   }
@@ -2816,19 +2855,29 @@ void ddl_log_release_entries(DDL_LOG_STATE *ddl_log_state)
    successfully and we can disable the execute log entry.
 */
 
-void ddl_log_complete(DDL_LOG_STATE *state)
+void DDL_LOG_STATE::complete(THD *thd)
 {
   DBUG_ENTER("ddl_log_complete");
 
-  if (unlikely(!state->list))
+  if (unlikely(!list))
     DBUG_VOID_RETURN;                           // ddl log not used
 
   mysql_mutex_lock(&LOCK_gdl);
-  if (likely(state->execute_entry))
-    ddl_log_disable_execute_entry(&state->execute_entry);
-  ddl_log_release_entries(state);
+  if (revert)
+  {
+    ddl_log_update_recovery(execute_entry->entry_pos, 0);
+    if (ddl_log_execute_entry_no_lock(thd, list->entry_pos))
+    {
+      push_warning_printf(thd, Sql_condition::WARN_LEVEL_WARN, 1,
+                    "Failed execute entry %u", execute_entry->entry_pos);
+    }
+    ddl_log_disable_execute_entry(&execute_entry);
+  }
+  else if (likely(execute_entry))
+    ddl_log_disable_execute_entry(&execute_entry);
+  ddl_log_release_entries(this);
   mysql_mutex_unlock(&LOCK_gdl);
-  state->list= 0;
+  list= 0;
   DBUG_VOID_RETURN;
 };
 
@@ -2846,15 +2895,10 @@ void ddl_log_revert(THD *thd, DDL_LOG_STATE *state)
   if (unlikely(!state->list))
     DBUG_VOID_RETURN;                           // ddl log not used
 
-  mysql_mutex_lock(&LOCK_gdl);
   if (likely(state->execute_entry))
-  {
-    ddl_log_execute_entry_no_lock(thd, state->list->entry_pos);
-    ddl_log_disable_execute_entry(&state->execute_entry);
-  }
-  ddl_log_release_entries(state);
-  mysql_mutex_unlock(&LOCK_gdl);
-  state->list= 0;
+    state->revert= true;
+
+  state->complete(thd);
   DBUG_VOID_RETURN;
 }
 
@@ -3034,15 +3078,48 @@ static bool ddl_log_drop_init(THD *thd, DDL_LOG_STATE *ddl_state,
                               const LEX_CSTRING *comment)
 {
   DDL_LOG_ENTRY ddl_log_entry;
-  DBUG_ENTER("ddl_log_drop_file");
+  DDL_LOG_MEMORY_ENTRY *log_entry;
+  DBUG_ENTER("ddl_log_drop_init");
 
   bzero(&ddl_log_entry, sizeof(ddl_log_entry));
 
   ddl_log_entry.action_type=  action_code;
   ddl_log_entry.from_db=      *const_cast<LEX_CSTRING*>(db);
   ddl_log_entry.tmp_name=     *const_cast<LEX_CSTRING*>(comment);
+  if (ddl_state->skip_binlog)
+    ddl_log_entry.flags|=     DDL_LOG_FLAG_DROP_SKIP_BINLOG;
 
-  DBUG_RETURN(ddl_log_write(ddl_state, &ddl_log_entry));
+  mysql_mutex_lock(&LOCK_gdl);
+  if (ddl_log_write_entry(&ddl_log_entry, &log_entry))
+    goto error;
+
+  (void) ddl_log_sync_no_lock(); // FIXME: why sync is before update_next_entry_pos()
+  if (ddl_state->list)
+  {
+    if (update_next_entry_pos(ddl_state->list->entry_pos,
+                              log_entry->entry_pos))
+    {
+      ddl_log_release_memory_entry(log_entry);
+      goto error;
+    }
+  }
+  else
+  {
+    if (ddl_log_write_execute_entry(log_entry->entry_pos,
+                                    &ddl_state->execute_entry))
+    {
+      ddl_log_release_memory_entry(log_entry);
+      goto error;
+    }
+  }
+
+  mysql_mutex_unlock(&LOCK_gdl);
+  add_log_entry(ddl_state, log_entry);
+  DBUG_RETURN(0);
+
+error:
+  mysql_mutex_unlock(&LOCK_gdl);
+  DBUG_RETURN(1);
 }
 
 
@@ -3084,12 +3161,14 @@ static bool ddl_log_drop(THD *thd, DDL_LOG_STATE *ddl_state,
   ddl_log_entry.name=         *const_cast<LEX_CSTRING*>(table);
   ddl_log_entry.tmp_name=     *const_cast<LEX_CSTRING*>(path);
   ddl_log_entry.phase=        (uchar) phase;
+  if (ddl_state->revert)
+    ddl_log_entry.flags= DDL_LOG_FLAG_SKIP_BINLOG;
 
   mysql_mutex_lock(&LOCK_gdl);
   if (ddl_log_write_entry(&ddl_log_entry, &log_entry))
     goto error;
 
-  (void) ddl_log_sync_no_lock();
+  (void) ddl_log_sync_no_lock(); // FIXME: why sync is before update_next_entry_pos()
   if (update_next_entry_pos(ddl_state->list->entry_pos,
                             log_entry->entry_pos))
   {
@@ -3211,6 +3290,7 @@ bool ddl_log_create_table(THD *thd, DDL_LOG_STATE *ddl_state,
                           bool only_frm)
 {
   DDL_LOG_ENTRY ddl_log_entry;
+  DDL_LOG_MEMORY_ENTRY *log_entry;
   DBUG_ENTER("ddl_log_create_table");
 
   bzero(&ddl_log_entry, sizeof(ddl_log_entry));
@@ -3223,7 +3303,29 @@ bool ddl_log_create_table(THD *thd, DDL_LOG_STATE *ddl_state,
   ddl_log_entry.tmp_name=     *const_cast<LEX_CSTRING*>(path);
   ddl_log_entry.flags=        only_frm ? DDL_LOG_FLAG_ONLY_FRM : 0;
 
-  DBUG_RETURN(ddl_log_write(ddl_state, &ddl_log_entry));
+  if (!ddl_state->is_active())
+    DBUG_RETURN(ddl_log_write(ddl_state, &ddl_log_entry));
+
+  ddl_log_entry.next_entry= ddl_state->list->entry_pos;
+  mysql_mutex_lock(&LOCK_gdl);
+  if (ddl_log_write_entry(&ddl_log_entry, &log_entry))
+    goto error;
+
+  if (update_next_entry_pos(ddl_state->execute_entry->entry_pos,
+                            log_entry->entry_pos))
+  {
+    ddl_log_release_memory_entry(log_entry);
+    goto error;
+  }
+  (void) ddl_log_sync_no_lock();
+
+  mysql_mutex_unlock(&LOCK_gdl);
+  add_log_entry(ddl_state, log_entry);
+  DBUG_RETURN(0);
+
+error:
+  mysql_mutex_unlock(&LOCK_gdl);
+  DBUG_RETURN(1);
 }
 
 
@@ -3430,4 +3532,29 @@ err:
   */
   mysql_mutex_unlock(&LOCK_gdl);
   DBUG_RETURN(1);
+}
+
+
+void DDL_LOG_STATE::do_execute(THD *thd)
+{
+  DBUG_ASSERT(revert);
+  ddl_log_update_recovery(execute_entry->entry_pos, 0);
+  if (ddl_log_execute_entry(thd, execute_entry->next_log_entry->entry_pos))
+  {
+    push_warning(thd, Sql_condition::WARN_LEVEL_WARN, 1,
+                  "Failed to remove old table");
+  }
+}
+
+
+bool DDL_LOG_STATE::set_master(DDL_LOG_STATE *master_chain)
+{
+  DBUG_ASSERT(master_chain->execute_entry);
+  DDL_LOG_ENTRY ddl_log_entry;
+  bzero(&ddl_log_entry, sizeof(ddl_log_entry));
+
+  ddl_log_entry.action_type=  DDL_LOG_EXECUTE_ACTION;
+  ddl_log_entry.unique_id=    master_chain->execute_entry->entry_pos;
+
+  return ddl_log_write(this, &ddl_log_entry);
 }
