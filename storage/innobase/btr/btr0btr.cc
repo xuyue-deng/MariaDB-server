@@ -979,10 +979,14 @@ btr_free_root_check(
 	ut_ad(page_id.space() != SRV_TMP_SPACE_ID);
 	ut_ad(index_id != BTR_FREED_INDEX_ID);
 
-	buf_block_t*	block = buf_page_get(
-		page_id, zip_size, RW_X_LATCH, mtr);
+	buf_block_t*	block = buf_page_get_gen(
+		page_id, zip_size, RW_X_LATCH, NULL, BUF_GET_POSSIBLY_FREED,
+		__FILE__, __LINE__, mtr);
 
-	if (block) {
+	if (!block) {
+	} else if (block->page.status == buf_page_t::FREED) {
+		block = NULL;
+	} else {
 		buf_block_dbg_add_level(block, SYNC_TREE_NODE);
 
 		if (fil_page_index_page_check(block->frame)
@@ -1205,23 +1209,20 @@ top_loop:
 @param[in]	zip_size	ROW_FORMAT=COMPRESSED page size, or 0
 @param[in]	index_id	PAGE_INDEX_ID contents
 @param[in,out]	mtr		mini-transaction */
-void
-btr_free_if_exists(
-	const page_id_t		page_id,
-	ulint			zip_size,
-	index_id_t		index_id,
-	mtr_t*			mtr)
+void btr_free_if_exists(const page_id_t page_id, ulint zip_size,
+                        index_id_t index_id, mtr_t *mtr)
 {
-	buf_block_t* root = btr_free_root_check(
-		page_id, zip_size, index_id, mtr);
-
-	if (root == NULL) {
-		return;
-	}
-
-	btr_free_but_not_root(root, mtr->get_log_mode());
-	mtr->set_named_space_id(page_id.space());
-	btr_free_root(root, mtr);
+  if (fil_space_t *space= fil_space_t::get(page_id.space()))
+  {
+    if (buf_block_t *root= btr_free_root_check(page_id, zip_size, index_id,
+                                               mtr))
+    {
+      btr_free_but_not_root(root, mtr->get_log_mode());
+      mtr->set_named_space(space);
+      btr_free_root(root, mtr);
+    }
+    space->release();
+  }
 }
 
 /** Free an index tree in a temporary tablespace.
