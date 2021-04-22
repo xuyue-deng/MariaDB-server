@@ -305,7 +305,7 @@ static bool write_ddl_log_file_entry(uint entry_pos)
 static bool update_phase(uint entry_pos, uchar phase)
 {
   DBUG_ENTER("update_phase");
-  DBUG_PRINT("enter", ("phase: %d", (int) phase));
+  DBUG_PRINT("ddl_log", ("pos: %u  phase: %u", entry_pos, (uint) phase));
 
   DBUG_RETURN(mysql_file_pwrite(global_ddl_log.file_id, &phase, 1,
                                 global_ddl_log.io_size * entry_pos +
@@ -338,6 +338,9 @@ static bool update_next_entry_pos(uint entry_pos, uint next_entry)
 {
   uchar buff[4];
   DBUG_ENTER("update_next_entry_pos");
+
+  DBUG_PRINT("ddl_log",
+              ("pos: %u->%u", entry_pos, next_entry));
 
   int4store(buff, next_entry);
   DBUG_RETURN(mysql_file_pwrite(global_ddl_log.file_id, buff, sizeof(buff),
@@ -390,6 +393,7 @@ static bool disable_execute_entry(uint entry_pos)
 {
   uchar buff[1];
   DBUG_ENTER("disable_execute_entry");
+  DBUG_PRINT("ddl_log", ("pos: {%u}", entry_pos));
 
   buff[0]= DDL_IGNORE_LOG_ENTRY_CODE;
   DBUG_RETURN(mysql_file_pwrite(global_ddl_log.file_id, buff, sizeof(buff),
@@ -1261,13 +1265,15 @@ static int ddl_log_execute_action(THD *thd, MEM_ROOT *mem_root,
 
   mysql_mutex_assert_owner(&LOCK_gdl);
   DBUG_PRINT("ddl_log",
-             ("entry type: %u  action type: %u (%s) phase: %u  next: %u  "
+             ("pos: %u=>%u->%u  type: %u  action: %u (%s) phase: %u  "
               "handler: '%s'  name: '%s'  from_name: '%s'  tmp_name: '%s'",
+              recovery_state.execute_entry_pos,
+              ddl_log_entry->entry_pos,
+              ddl_log_entry->next_entry,
               (uint) ddl_log_entry->entry_type,
               (uint) ddl_log_entry->action_type,
               ddl_log_action_name[ddl_log_entry->action_type],
               (uint) ddl_log_entry->phase,
-              ddl_log_entry->next_entry,
               ddl_log_entry->handler_name.str,
               ddl_log_entry->name.str,
               ddl_log_entry->from_name.str,
@@ -2404,13 +2410,12 @@ bool ddl_log_write_entry(DDL_LOG_ENTRY *ddl_log_entry,
 
   error= FALSE;
   DBUG_PRINT("ddl_log",
-             ("entry type: %u  action type: %u (%s) phase: %u  next: %u  "
+             ("pos: %u  action: %u (%s) phase: %u  "
               "handler: '%s'  name: '%s'  from_name: '%s'  tmp_name: '%s'",
-              (uint) ddl_log_entry->entry_type,
+              (*active_entry)->entry_pos,
               (uint) ddl_log_entry->action_type,
               ddl_log_action_name[ddl_log_entry->action_type],
               (uint) ddl_log_entry->phase,
-              ddl_log_entry->next_entry,
               ddl_log_entry->handler_name.str,
               ddl_log_entry->name.str,
               ddl_log_entry->from_name.str,
@@ -2478,7 +2483,10 @@ bool ddl_log_write_execute_entry(uint first_entry,
     if (ddl_log_get_free_entry(active_entry))
       DBUG_RETURN(TRUE);
     got_free_entry= TRUE;
- }
+  }
+  DBUG_PRINT("ddl_log",
+             ("pos: %u=>%u",
+             (*active_entry)->entry_pos, first_entry));
   if (write_ddl_log_file_entry((*active_entry)->entry_pos))
   {
     if (got_free_entry)
@@ -2511,6 +2519,7 @@ bool ddl_log_increment_phase(uint entry_pos)
 {
   bool error;
   DBUG_ENTER("ddl_log_increment_phase");
+  DBUG_PRINT("ddl_log", ("pos: %u", entry_pos));
 
   mysql_mutex_lock(&LOCK_gdl);
   error= ddl_log_increment_phase_no_lock(entry_pos);
