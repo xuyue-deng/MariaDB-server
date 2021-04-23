@@ -413,7 +413,7 @@ bool mysql_create_or_drop_trigger(THD *thd, TABLE_LIST *tables, bool create)
   */
   TABLE *table;
   bool result= TRUE;
-  bool add_if_exists_to_binlog= 0;
+  bool add_if_exists_to_binlog= 0, action_executed= 0;
   String stmt_query;
   bool lock_upgrade_done= FALSE;
   MDL_ticket *mdl_ticket= NULL;
@@ -512,7 +512,8 @@ bool mysql_create_or_drop_trigger(THD *thd, TABLE_LIST *tables, bool create)
       */
       result= FALSE;
       /* Still, we need to log the query ... */
-      stmt_query.append(thd->query(), thd->query_length());
+      stmt_query.set(thd->query(), thd->query_length(), system_charset_info);
+      action_executed= 1;
       goto end;
     }
   }
@@ -635,6 +636,7 @@ bool mysql_create_or_drop_trigger(THD *thd, TABLE_LIST *tables, bool create)
       goto drop_orphan_trn;
     }
   }
+  action_executed= 1;
 
   close_all_tables_for_name(thd, table->s, HA_EXTRA_NOT_USED, NULL);
 
@@ -653,7 +655,7 @@ bool mysql_create_or_drop_trigger(THD *thd, TABLE_LIST *tables, bool create)
   sp_cache_invalidate();
 
 end:
-  if (!result)
+  if (!result && action_executed)
   {
     ulonglong save_option_bits= thd->variables.option_bits;
     backup_log_info ddl_log;
@@ -716,6 +718,8 @@ drop_orphan_trn:
   mysql_file_delete(key_file_trg, trn_path_buff, MYF(0));
   result= thd->is_error();
   add_if_exists_to_binlog= 1;
+  action_executed= 1;
+  stmt_query.set(thd->query(), thd->query_length(), system_charset_info);
   goto end;
 }
 
