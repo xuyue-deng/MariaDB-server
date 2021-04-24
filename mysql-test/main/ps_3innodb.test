@@ -18,13 +18,17 @@ use test;
 
 let $type= 'InnoDB' ;
 -- source include/ps_create.inc
+--echo ## PS_CREATE.INC DONE
 -- source include/ps_renew.inc
-
+--echo ## PS_RENEW.INC DONE
 -- source include/ps_query.inc
+--echo ## PS_QUERY.INC DONE
 -- source include/ps_modify.inc
+--echo ## PS_MODIFY.INC DONE
 -- source include/ps_modify1.inc
+--echo ## PS_MODIFY1.INC DONE
 -- source include/ps_conv.inc
-
+--echo ## PS_CONV.INC DONE
 drop table t1, t9;
 
 # End of 4.1 tests

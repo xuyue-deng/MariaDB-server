@@ -19,6 +19,7 @@ c29 longblob, c30 longtext, c31 enum('one', 'two', 'three'),
 c32 set('monday', 'tuesday', 'wednesday'),
 primary key(c1)
 ) engine = 'InnoDB'  ;
+## PS_CREATE.INC DONE
 delete from t1 ;
 insert into t1 values (1,'one');
 insert into t1 values (2,'two');
@@ -45,6 +46,7 @@ c22= '123456789a123456789b123456789c', c23= 'tinyblob', c24= 'tinytext',
 c25= 'blob', c26= 'text', c27= 'mediumblob', c28= 'mediumtext',
 c29= 'longblob', c30= 'longtext', c31='two', c32= 'tuesday';
 commit ;
+## PS_RENEW.INC DONE
 test_sequence
 ------ simple select tests ------
 prepare stmt1 from ' select * from t9 order by c1 ' ;
@@ -1165,6 +1167,7 @@ def					rows	253	64	1	Y	0	39	8
 def					Extra	253	255	0	N	1	39	8
 id	select_type	table	type	possible_keys	key	key_len	ref	rows	Extra
 1	SIMPLE	t9	ALL	NULL	NULL	NULL	NULL	2	
+## PS_QUERY.INC DONE
 test_sequence
 ------ delete tests ------
 delete from t1 ;
@@ -1616,6 +1619,7 @@ a	b
 execute stmt_select2 ;
 c1	c21
 set @arg00= @arg00 + 1 ;
+## PS_MODIFY.INC DONE
 delete from t1 ;
 insert into t1 values (1,'one');
 insert into t1 values (2,'two');
@@ -1722,6 +1726,7 @@ a	b
 4	duplicate 
 103	three
 drop table t2;
+## PS_MODIFY1.INC DONE
 drop table if exists t5 ;
 set @arg01= 8;
 set @arg02= 8.0;
@@ -3472,4 +3477,5 @@ where c1= 20 and abs(c17 - ?) < 0.01" ;
 execute stmt1 using @arg00 ;
 found
 true
+## PS_CONV.INC DONE
 drop table t1, t9;
