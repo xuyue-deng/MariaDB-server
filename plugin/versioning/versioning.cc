@@ -175,6 +175,12 @@ static int versioning_plugin_init(void *p __attribute__ ((unused)))
 static int versioning_plugin_deinit(void *p __attribute__ ((unused)))
 {
   DBUG_ENTER("versioning_plugin_deinit");
+  int res= item_create_remove(func_array);
+  if (res)
+  {
+    my_message(ER_PLUGIN_IS_NOT_LOADED, "Can't append function array" , MYF(0));
+    DBUG_RETURN(res);
+  }
   DBUG_RETURN(0);
 }
 
